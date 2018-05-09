@@ -693,6 +693,7 @@ experimental_headers = \
 	${experimental_srcdir}/unordered_set \
 	${experimental_srcdir}/utility \
 	${experimental_srcdir}/vector \
+	${experimental_par_offload_headers} \
 	${experimental_filesystem_headers}
 
 experimental_bits_srcdir = ${glibcxx_srcdir}/include/experimental/bits
@@ -702,6 +703,8 @@ experimental_bits_headers = \
 	${experimental_bits_srcdir}/lfts_config.h \
 	${experimental_bits_srcdir}/shared_ptr.h \
 	${experimental_bits_srcdir}/string_view.tcc \
+	${experimental_bits_srcdir}/invocation_type.tcc \
+	${experimental_bits_par_offload_headers} \
 	${experimental_bits_filesystem_headers}
 
 if ENABLE_FILESYSTEM_TS
@@ -715,6 +718,25 @@ experimental_bits_filesystem_headers = \
 else
 experimental_filesystem_headers =
 experimental_bits_filesystem_headers =
+endif
+
+if ENABLE_PAR_OFFLOAD
+experimental_par_offload_headers = \
+	${experimental_srcdir}/par_offload
+experimental_bits_par_offload_headers = \
+	${experimental_bits_srcdir}/par_offload_copy_if.tcc \
+	${experimental_bits_srcdir}/par_offload_for_each.tcc \
+	${experimental_bits_srcdir}/par_offload_helpers.tcc \
+	${experimental_bits_srcdir}/par_offload_max_element.tcc \
+	${experimental_bits_srcdir}/par_offload_minmax_element.tcc \
+	${experimental_bits_srcdir}/par_offload_reduce.tcc \
+	${experimental_bits_srcdir}/par_offload_transform.tcc \
+	${experimental_bits_srcdir}/par_offload_transform_binary.tcc \
+	${experimental_bits_srcdir}/par_offload_transform_reduce_binary.tcc \
+	${experimental_bits_srcdir}/par_offload_placeholders.tcc
+else
+experimental_par_offload_headers =
+experimental_bits_par_offload_headers =
 endif
 
 # This is the common subset of C++ files that all three "C" header models use.

@@ -101,6 +101,7 @@ proc libstdc++_init { testfile } {
     global tool_timeout
     global DEFAULT_CXXFLAGS
     global STATIC_LIBCXXFLAGS
+    global STATIC_LIBGOMPFLAGS
 
     # We set LC_ALL and LANG to C so that we get the same error
     # messages as expected.
@@ -204,6 +205,14 @@ proc libstdc++_init { testfile } {
 	# Some targets use libstdc++.a%s in their specs, so they need a
 	# -B option for uninstalled testing.
 	set STATIC_LIBCXXFLAGS " -B${staticlibdir} "
+    }
+
+    # TODO: add libgomp only if par-offload enabled.
+    set STATIC_LIBGOMPFLAGS ""
+    set gompblddir [lookfor_file $blddir/../libgomp libgomp.spec]
+    if {$gompblddir != ""} {
+	set gompblddir [file dirname $gompblddir]
+	set STATIC_LIBGOMPFLAGS " -B${gompblddir} -L${gompblddir}/.libs"
     }
 
     # Compute what needs to be added to the existing LD_LIBRARY_PATH.
@@ -469,6 +478,7 @@ proc v3_target_compile { source dest type options } {
     global cxxldflags
     global includes
     global STATIC_LIBCXXFLAGS
+    global STATIC_LIBGOMPFLAGS
     global tool
 
     lappend options "additional_flags=-fno-diagnostics-show-caret -fdiagnostics-color=never"
@@ -482,6 +492,7 @@ proc v3_target_compile { source dest type options } {
     set cxxlibglossflags  [libgloss_link_flags]
     set cxx_final [concat $cxx_final $cxxlibglossflags]
     set cxx_final [concat $cxx_final $STATIC_LIBCXXFLAGS]
+    set cxx_final [concat $cxx_final $STATIC_LIBGOMPFLAGS]
     set cxx_final [concat $cxx_final $cxxflags]
     set cxx_final [concat $cxx_final $cxxvtvflags]
     set cxx_final [concat $cxx_final $includes]
@@ -2031,6 +2042,62 @@ proc check_v3_target_filesystem_ts { } {
     }
     verbose "check_v3_target_filesystem_ts: $et_filesystem_ts" 2
     return $et_filesystem_ts
+}
+
+# Return 1 if the experimental par_offload policy is supported,
+# 0 otherwise.
+# Cache the result.
+proc check_v3_target_par_offload { } {
+    global cxxflags
+    global DEFAULT_CXXFLAGS
+    global et_par_offload
+    global tool
+
+    if { ![info exists et_par_offload_target_name] } {
+	set et_par_offload_target_name ""
+    }
+
+    # If the target has changed since we set the cached value, clear it.
+    set current_target [current_target_name]
+    if { $current_target != $et_par_offload_target_name } {
+	verbose "check_v3_target_par_offload: `$et_par_offload_target_name'" 2
+	set et_par_offload_target_name $current_target
+	if [info exists et_par_offload] {
+	    verbose "check_v3_target_par_offload: removing cached result" 2
+	    unset et_par_offload
+	}
+    }
+
+    if [info exists et_par_offload] {
+	verbose "check_v3_target_par_offload: using cached result" 2
+    } else {
+	set et_par_offload 0
+
+	# Set up and preprocess a C++ test program that depends
+	# on the par_offload feature-test macro being defined.
+	set src par_offload_ts[pid].cc
+
+	set f [open $src "w"]
+	puts $f "#include <experimental/par_offload>"
+	puts $f "#if ! __cpp_lib_experimental_par_offload"
+	puts $f "#  error No par_offload support"
+	puts $f "#endif"
+	close $f
+
+	set cxxflags_saved $cxxflags
+	set cxxflags "$cxxflags $DEFAULT_CXXFLAGS -Werror -fpar-offload"
+
+	set lines [v3_target_compile $src /dev/null preprocess ""]
+	set cxxflags $cxxflags_saved
+	file delete $src
+
+	if [string match "" $lines] {
+	    # No error message, preprocessing succeeded.
+	    set et_par_offload 1
+	}
+    }
+    verbose "check_v3_target_par_offload: $et_par_offload" 2
+    return $et_par_offload
 }
 
 # Return 1 if the "cxx11" ABI is in use using the current flags, 0 otherwise.

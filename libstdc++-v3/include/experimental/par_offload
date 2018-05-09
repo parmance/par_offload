@@ -1,0 +1,81 @@
+// <experimental/par_offload> -*- C++ -*-
+
+// Copyright (C) 2017-2018 Free Software Foundation, Inc.
+// Contributed by Pekka Jaaskelainen <pekka.jaaskelainen@parmance.com>
+// for General Processor Tech.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files
+// (the "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to
+// the following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+/** @file experimental/par_offload
+ *  This implements the experimental heterogeneous offloading execution
+ *  policy of Parallel STL.
+ */
+
+#ifndef _GLIBCXX_EXPERIMENTAL_PAR_OFFLOAD
+#define _GLIBCXX_EXPERIMENTAL_PAR_OFFLOAD 1
+
+#pragma GCC system_header
+
+#if __cplusplus >= 201402L
+
+#include <bits/c++config.h>
+
+#define __cpp_lib_experimental_par_offload 201712
+
+namespace std _GLIBCXX_VISIBILITY(default)
+{
+_GLIBCXX_BEGIN_NAMESPACE_VERSION
+
+namespace experimental
+{
+namespace execution
+{
+  class sequenced_policy {};
+  class parallel_policy {};
+  class parallel_unsequenced_policy {};
+  class parallel_offload_policy : public parallel_unsequenced_policy {};
+  constexpr sequenced_policy seq;
+  constexpr parallel_policy par;
+  constexpr parallel_unsequenced_policy par_unseq;
+  constexpr parallel_offload_policy par_offload;
+
+#ifdef _TESTING_PAR_OFFLOAD
+  /// Used during testing to check if the last PSTL call was offloaded
+  /// instead of falling back to CPU execution.
+  bool __pstl_was_offloaded;
+#endif
+
+} // namespace execution
+} // namespace experimental
+} // namespace std
+
+// Some of the latter algorithms delegate to 'transform' and 'reduce', so
+// their include order matters.
+#include <experimental/bits/par_offload_transform_binary.tcc>
+#include <experimental/bits/par_offload_transform.tcc>
+#include <experimental/bits/par_offload_reduce.tcc>
+#include <experimental/bits/par_offload_transform_reduce_binary.tcc>
+#include <experimental/bits/par_offload_copy_if.tcc>
+#include <experimental/bits/par_offload_max_element.tcc>
+#include <experimental/bits/par_offload_minmax_element.tcc>
+#include <experimental/bits/par_offload_for_each.tcc>
+
+#endif
+#endif

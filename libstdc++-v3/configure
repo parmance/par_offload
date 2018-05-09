@@ -642,6 +642,8 @@ DOT
 DOXYGEN
 BUILD_INFO_FALSE
 BUILD_INFO_TRUE
+ENABLE_PAR_OFFLOAD_FALSE
+ENABLE_PAR_OFFLOAD_TRUE
 ENABLE_FILESYSTEM_TS_FALSE
 ENABLE_FILESYSTEM_TS_TRUE
 baseline_subdir_switch
@@ -901,6 +903,7 @@ enable_libstdcxx_dual_abi
 with_default_libstdcxx_abi
 enable_libstdcxx_threads
 enable_libstdcxx_filesystem_ts
+enable_pstl_par_offload
 enable_cet
 with_gxx_include_dir
 enable_version_specific_runtime_libs
@@ -1600,6 +1603,9 @@ Optional Features:
                           enable C++11 threads support [default=auto]
   --enable-libstdcxx-filesystem-ts
                           turns on ISO/IEC TS 18822 support [default=auto]
+  --enable-pstl-par-offload
+                          turns on experimental par_offload support for PSTL
+                          [default=no]
   --enable-cet            enable Intel CET in target libraries [default=no]
   --enable-version-specific-runtime-libs
                           Specify that runtime libraries should be installed
@@ -80528,6 +80534,29 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
 
 
+# For experimental par_offload for PSTL.
+
+   # Check whether --enable-pstl-par-offload was given.
+if test "${enable_pstl_par_offload+set}" = set; then :
+  enableval=$enable_pstl_par_offload;
+      case "$enableval" in
+       yes|no) ;;
+       *) as_fn_error "Unknown argument to enable/disable pstl-par-offload" "$LINENO" 5 ;;
+	  	        esac
+
+else
+  enable_pstl_par_offload=no
+fi
+
+
+
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking whether to include PSTL par_offload policy support" >&5
+$as_echo_n "checking whether to include PSTL par_offload policy support... " >&6; }
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_pstl_par_offload" >&5
+$as_echo "$enable_pstl_par_offload" >&6; }
+
+
+
 # For Transactional Memory TS
 
   { $as_echo "$as_me:${as_lineno-$LINENO}: checking how size_t is mangled" >&5
@@ -81437,6 +81466,15 @@ else
 fi
 
 
+    if test $enable_pstl_par_offload = yes; then
+  ENABLE_PAR_OFFLOAD_TRUE=
+  ENABLE_PAR_OFFLOAD_FALSE='#'
+else
+  ENABLE_PAR_OFFLOAD_TRUE='#'
+  ENABLE_PAR_OFFLOAD_FALSE=
+fi
+
+
 
 
 cat >confcache <<\_ACEOF
@@ -81886,6 +81924,10 @@ Usually this means the macro was only invoked conditionally." "$LINENO" 5
 fi
 if test -z "${ENABLE_FILESYSTEM_TS_TRUE}" && test -z "${ENABLE_FILESYSTEM_TS_FALSE}"; then
   as_fn_error "conditional \"ENABLE_FILESYSTEM_TS\" was never defined.
+Usually this means the macro was only invoked conditionally." "$LINENO" 5
+fi
+if test -z "${ENABLE_PAR_OFFLOAD_TRUE}" && test -z "${ENABLE_PAR_OFFLOAD_FALSE}"; then
+  as_fn_error "conditional \"ENABLE_PAR_OFFLOAD\" was never defined.
 Usually this means the macro was only invoked conditionally." "$LINENO" 5
 fi
 if test -z "${BUILD_INFO_TRUE}" && test -z "${BUILD_INFO_FALSE}"; then

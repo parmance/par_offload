@@ -1608,6 +1608,7 @@ propagate_pure_const (void)
 		  break;
 		case IPA_REF_ADDR:
 		case IPA_REF_CHKP:
+		case IPA_REF_ALIAS:
 		  break;
 		default:
 		  gcc_unreachable ();

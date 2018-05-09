@@ -422,6 +422,9 @@ AC_CHECK_HEADERS([fcntl.h dirent.h sys/statvfs.h utime.h])
 GLIBCXX_ENABLE_FILESYSTEM_TS
 GLIBCXX_CHECK_FILESYSTEM_DEPS
 
+# For experimental par_offload for PSTL.
+GLIBCXX_ENABLE_PAR_OFFLOAD
+
 # For Transactional Memory TS
 GLIBCXX_CHECK_SIZE_T_MANGLING
 

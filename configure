@@ -749,6 +749,7 @@ with_build_libsubdir
 with_system_zlib
 enable_as_accelerator_for
 enable_offload_targets
+enable_pstl_par_offload
 enable_gold
 enable_ld
 enable_compressed_debug_sections
@@ -1475,6 +1476,7 @@ Optional Features:
                           enable offloading to devices from comma-separated
                           LIST of TARGET[=DIR]. Use optional path to find
                           offload target compiler during the build
+  --enable-par-offload    enable par_offload (-fpar-offload) support for PSTL.
   --enable-gold[=ARG]     build gold [ARG={default,yes,no}]
   --enable-ld[=ARG]       build ld [ARG={default,yes,no}]
   --enable-compressed-debug-sections={all,gas,gold,ld,none}
@@ -2923,6 +2925,20 @@ if test "${enable_offload_targets+set}" = set; then :
 
 else
   enable_offload_targets=
+fi
+
+
+# Check whether --enable-pstl-par-offload was given.
+if test "${enable_pstl_par_offload+set}" = set; then :
+  enableval=$enable_pstl_par_offload;
+  # -fpar-offload currently requires HSA offload support.
+  case ",${enable_offload_targets}," in
+    *,hsa,*) ;;
+    *)
+    as_fn_error "par_offload requires --enable-offload-targets=hsa" "$LINENO" 5
+    ;;
+  esac
+
 fi
 
 

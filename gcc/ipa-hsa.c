@@ -65,6 +65,193 @@ check_warn_node_versionable (cgraph_node *node)
   return true;
 }
 
+/* Search the callgraph for any function that might be a candidate for
+   offloading via parallel STL calls and marks them with the "hsa_universal"
+   attribute.  */
+
+static void
+mark_possibly_pstl_offloaded_functions ()
+{
+  vec<cgraph_node *> nodes_to_remove;
+  struct cgraph_node *node;
+  FOR_EACH_DEFINED_FUNCTION(node)
+  {
+    hsa_function_summary *s = hsa_summaries->get (node);
+    tree decl = node->decl;
+
+    if (dump_file)
+      fprintf (dump_file, "CONSIDERING function '%s' for HSA offloading.\n",
+	       get_name (decl));
+
+    bool is_kernel = lookup_attribute ("hsa_kernel", DECL_ATTRIBUTES (decl));
+
+    /* A linked function is skipped.  */
+    if (s->m_bound_function != NULL)
+      continue;
+
+    /* Skip known functions which are known to cause problems when compiling
+       to HSAIL. */
+
+    /* In case a hsa_kernel is unsupported (e.g. due to return
+       slot optimized calls inside it), ensure it won't get called
+       or compiled to host ISA by changing it to hsa_function.  */
+#define UNSUPPORTED_HSA_F(__PRED, __REASON)				\
+    {									\
+      if (__PRED)							\
+	{								\
+	  if (dump_enabled_p())						\
+	    dump_printf_loc						\
+	      (MSG_MISSED_OPTIMIZATION, DECL_SOURCE_LOCATION (decl),	\
+	       "Unable to prepare '%s' for HSA offloading (" __REASON ").\n", \
+	       get_name (decl));					\
+	  DECL_ATTRIBUTES (decl)					\
+	    = remove_attribute ("omp declare target",			\
+				DECL_ATTRIBUTES (decl));		\
+	  if (lookup_attribute ("hsa_kernel", DECL_ATTRIBUTES(decl)))	\
+	    nodes_to_remove.safe_push (node);				\
+	  continue;							\
+	}								\
+    } do {} while (0)
+
+    UNSUPPORTED_HSA_F (DECL_VIRTUAL_P (decl), "virtual function");
+    UNSUPPORTED_HSA_F (MAIN_NAME_P (DECL_NAME (decl)), "main function");
+    UNSUPPORTED_HSA_F (node->only_called_directly_or_aliased_p (),
+		       "indirect function");
+    UNSUPPORTED_HSA_F (node->indirect_calls, "has indirect calls");
+    UNSUPPORTED_HSA_F (DECL_STATIC_CONSTRUCTOR (decl) ||
+		       DECL_STATIC_DESTRUCTOR (decl),
+		       "static object constructor or destructor");
+
+    bool calls_throwing_functions = false;
+    bool calls_functions_with_indirect_calls = false;
+    for (cgraph_edge *e = node->callees; e; e = e->next_callee)
+      {
+
+	/* Treat kernels as a special case here because they might
+	   call the empty placeholder declarations which _might_
+	   throw in the point of view of cgraph analysis.  */
+
+	if (!is_kernel && e->can_throw_external)
+	  {
+	    calls_throwing_functions = !is_kernel;
+	    break;
+	  }
+	if (e->callee->indirect_calls)
+	  {
+	    calls_functions_with_indirect_calls = true;
+	    break;
+	  }
+      }
+
+    UNSUPPORTED_HSA_F (calls_throwing_functions,
+		       "calls to functions that throw exceptions");
+    UNSUPPORTED_HSA_F (calls_functions_with_indirect_calls,
+		       "calls to functions with indirect calls");
+
+    /* Some of the internal identifiers from the C++ frontend must be skipped.
+       We can detect these from names that have a trailing space.  */
+    const char *name = get_name (decl);
+    UNSUPPORTED_HSA_F (name[strlen (name) - 1] == ' ',
+		       "C++ frontend internal function");
+
+    /* Scan the instructions and look for expressions not supported by
+       HSAIL or hsa-gen.c.  */
+
+    bool takes_address_of_function = false,
+      takes_address_of_unsupported_global_var = false,
+      calls_with_return_slot_opt = false,
+      known_bad = false;
+
+    function *func = node->get_fun ();
+    basic_block bb;
+    FOR_EACH_BB_FN (bb, func)
+      {
+	gimple_stmt_iterator gsi;
+
+	for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi) && !known_bad;
+	     gsi_next (&gsi))
+	  {
+	    gimple *stmt = gsi_stmt (gsi);
+
+	    if (is_gimple_debug (stmt) || !gimple_has_ops (stmt))
+	      continue;
+
+	    const bool is_call = is_gimple_call (stmt);
+
+	    if (is_call && gimple_call_return_slot_opt_p ((gcall*)(stmt)))
+	      {
+		calls_with_return_slot_opt = true;
+		known_bad = true;
+		break;
+	      }
+
+	    /* In case of calls, we need to check the call arguments.
+	       The function target operand is already checked for
+	       indirectness earlier.  */
+	    const unsigned num_ops
+	      = is_call
+	      ? gimple_call_num_args ((const gcall*)(stmt))
+	      : gimple_num_ops (stmt);
+
+	    for (unsigned opr = 0;
+		 gimple_has_ops (stmt) && opr < num_ops && !known_bad; ++opr)
+	      {
+		tree operand
+		  = !is_call ? gimple_op (stmt, opr)
+		  : gimple_call_arg ((const gcall*)(stmt), opr);
+
+		if (operand == NULL_TREE)
+		  break;
+
+		/* Taking the address of a function is not supported.   */
+		/* For now forbid also all kinds of global variable
+		   references as the mechanism to mark host-defined global
+		   variables that were not in modules built with -fpar_offload
+		   is not supported.   */
+		if (TREE_CODE (operand) == ADDR_EXPR)
+		  {
+		    if (TREE_CODE (TREE_OPERAND (operand, 0)) == FUNCTION_DECL)
+		      {
+			known_bad = true;
+			takes_address_of_function = true;
+			break;
+		      }
+		    else if (TREE_CODE (TREE_OPERAND (operand, 0)) == VAR_DECL
+			     && is_global_var (TREE_OPERAND (operand, 0)))
+		      {
+			known_bad = true;
+			takes_address_of_unsupported_global_var = true;
+			/*print_gimple_stmt (stdout, stmt, TDF_VOPS|TDF_MEMSYMS|TDF_ADDRESS);*/
+			break;
+		      }
+		  }
+	      }
+	  }
+      }
+
+    UNSUPPORTED_HSA_F (takes_address_of_function,
+		       "takes a function's address");
+
+    UNSUPPORTED_HSA_F (takes_address_of_unsupported_global_var,
+		       "refers to an unsupported global variable");
+
+    UNSUPPORTED_HSA_F (calls_with_return_slot_opt,
+		       "calls with return slot optimization");
+
+    if (!lookup_attribute ("hsa_universal", DECL_ATTRIBUTES (decl)))
+	DECL_ATTRIBUTES (decl) = tree_cons (get_identifier ("hsa_universal"),
+					    NULL_TREE, DECL_ATTRIBUTES (decl));
+
+    if (dump_file)
+      fprintf (dump_file, "MARKED function '%s' for HSA offloading.\n",
+	       get_name (decl));
+    /*dump_function_to_file (decl, stderr, TDF_VOPS|TDF_MEMSYMS|TDF_ADDRESS); */
+  }
+
+  for (size_t i = 0; i < nodes_to_remove.length (); ++i)
+    nodes_to_remove[i]->remove();
+}
+
 /* The function creates HSA clones for all functions that were either
    marked as HSA kernels or are callable HSA functions.  Apart from that,
    we redirect all edges that come from an HSA clone and end in another
@@ -78,6 +265,8 @@ process_hsa_functions (void)
   if (hsa_summaries == NULL)
     hsa_summaries = new hsa_summary_t (symtab);
 
+  if (flag_par_offload)
+    mark_possibly_pstl_offloaded_functions ();
 
   FOR_EACH_FUNCTION (node)
     {
@@ -138,6 +327,14 @@ process_hsa_functions (void)
                                           NULL, NULL, "hsa");
 
 	  TREE_PUBLIC (clone->decl) = TREE_PUBLIC (node->decl);
+
+	  if (flag_par_offload)
+	    /* The potential function pointer targets must be 'prog' scope
+	       to match the placeholder decl and be visible to the HSA
+	       runtime to query their symbol address.  */
+	    TREE_PUBLIC (clone->decl) = true;
+	  else
+	    TREE_PUBLIC (clone->decl) = TREE_PUBLIC (node->decl);
 
           clone->externally_visible = node->externally_visible;
 

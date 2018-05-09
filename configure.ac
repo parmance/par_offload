@@ -299,6 +299,19 @@ AC_ARG_ENABLE(offload-targets,
   fi
 ], [enable_offload_targets=])
 
+AC_ARG_ENABLE(pstl-par-offload,
+[AS_HELP_STRING([--enable-par-offload],
+		[enable par_offload (-fpar-offload) support for PSTL.])],
+[
+  # -fpar-offload currently requires HSA offload support.
+  case ",${enable_offload_targets}," in
+    *,hsa,*) ;;
+    *)
+    AC_MSG_ERROR([par_offload requires --enable-offload-targets=hsa])
+    ;;
+  esac
+], [])
+
 # Handle --enable-gold, --enable-ld.
 # --disable-gold [--enable-ld]
 #     Build only ld.  Default option.

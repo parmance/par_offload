@@ -1627,6 +1627,14 @@ fdirecthsa
 C ObjC C++ ObjC++ LTO Var(flag_directhsa)
 Enable direct HSA invocation infrastructure.
 
+fdirecthsa
+C ObjC C++ ObjC++ LTO Var(flag_directhsa) EnabledBy(fpar-offload)
+Enable direct HSA invocation infrastructure.
+
+fpar-offload
+C++ LTO Common Var(flag_par_offload)
+C++17 Parallel STL offloading policy support (needs HSA).
+
 foperator-names
 C++ ObjC++
 Recognize C++ keywords like \"compl\" and \"xor\".

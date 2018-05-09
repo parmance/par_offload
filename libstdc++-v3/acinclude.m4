@@ -4449,6 +4449,21 @@ dnl
 ])
 
 dnl
+dnl Check to see whether to include experimental par_offload support
+dnl
+dnl --enable-par-offload
+dnl
+AC_DEFUN([GLIBCXX_ENABLE_PAR_OFFLOAD], [
+  GLIBCXX_ENABLE(pstl-par-offload,no,,
+    [turns on experimental par_offload support for PSTL],
+    [permit yes|no])
+
+  AC_MSG_CHECKING([whether to include PSTL par_offload policy support])
+  AC_MSG_RESULT($enable_pstl_par_offload)
+  GLIBCXX_CONDITIONAL(ENABLE_PAR_OFFLOAD, test $enable_pstl_par_offload = yes)
+])
+
+dnl
 dnl Check how size_t is mangled.  Copied from libitm.
 dnl
 AC_DEFUN([GLIBCXX_CHECK_SIZE_T_MANGLING], [

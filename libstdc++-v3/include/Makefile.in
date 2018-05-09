@@ -986,6 +986,7 @@ experimental_headers = \
 	${experimental_srcdir}/unordered_set \
 	${experimental_srcdir}/utility \
 	${experimental_srcdir}/vector \
+	${experimental_par_offload_headers} \
 	${experimental_filesystem_headers}
 
 experimental_bits_srcdir = ${glibcxx_srcdir}/include/experimental/bits
@@ -995,6 +996,8 @@ experimental_bits_headers = \
 	${experimental_bits_srcdir}/lfts_config.h \
 	${experimental_bits_srcdir}/shared_ptr.h \
 	${experimental_bits_srcdir}/string_view.tcc \
+	${experimental_bits_srcdir}/invocation_type.tcc \
+	${experimental_bits_par_offload_headers} \
 	${experimental_bits_filesystem_headers}
 
 @ENABLE_FILESYSTEM_TS_FALSE@experimental_filesystem_headers = 
@@ -1007,6 +1010,23 @@ experimental_bits_headers = \
 @ENABLE_FILESYSTEM_TS_TRUE@	${experimental_bits_srcdir}/fs_fwd.h \
 @ENABLE_FILESYSTEM_TS_TRUE@	${experimental_bits_srcdir}/fs_ops.h \
 @ENABLE_FILESYSTEM_TS_TRUE@	${experimental_bits_srcdir}/fs_path.h
+
+@ENABLE_PAR_OFFLOAD_FALSE@experimental_par_offload_headers = 
+@ENABLE_PAR_OFFLOAD_TRUE@experimental_par_offload_headers = \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_srcdir}/par_offload
+
+@ENABLE_PAR_OFFLOAD_FALSE@experimental_bits_par_offload_headers = 
+@ENABLE_PAR_OFFLOAD_TRUE@experimental_bits_par_offload_headers = \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_copy_if.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_for_each.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_helpers.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_max_element.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_minmax_element.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_reduce.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_transform.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_transform_binary.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_transform_reduce_binary.tcc \
+@ENABLE_PAR_OFFLOAD_TRUE@	${experimental_bits_srcdir}/par_offload_placeholders.tcc
 
 
 # This is the common subset of C++ files that all three "C" header models use.
