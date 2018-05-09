@@ -1,0 +1,6 @@
+This builds utility libs (subset of libc/libm) for HSAIL
+kernels.
+
+buils.sh assumes to find an HSA-enabled 'gcc' in PATH.
+If it finds one, it builds build/*.so files which should
+be copied or linked to a path found by ld.so.
