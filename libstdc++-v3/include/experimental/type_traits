@@ -39,6 +39,7 @@
 
 #include <type_traits>
 #include <experimental/bits/lfts_config.h>
+#include <experimental/bits/invocation_type.tcc>
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -210,12 +211,6 @@ template <typename _Base, typename _Derived>
 template <typename _From, typename _To>
   constexpr bool is_convertible_v = is_convertible<_From, _To>::value;
 
-
-  // 3.3.2, Other type transformations
-  // invocation_type (still unimplemented)
-  // raw_invocation_type (still unimplemented)
-  // invocation_type_t (still unimplemented)
-  // raw_invocation_type_t (still unimplemented)
 } // namespace fundamentals_v1
 
 inline namespace fundamentals_v2
