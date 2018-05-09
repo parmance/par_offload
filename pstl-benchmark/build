@@ -1,0 +1,14 @@
+#!/bin/sh
+build_dir=$PWD
+src_dir=$build_dir/..
+src=$src_dir/pstl-benchmark/pstl-benchmark.cpp
+bin=benchmark
+
+# TO DEBUG: fails with -O0
+opt="-O2"
+
+$build_dir/./gcc/xg++ $CPPFLAGS $LDFLAGS -lhsa-runtime64 -Wno-hsa -shared-libgcc -B$build_dir/./gcc -nostdinc++ -L$build_dir/x86_64-pc-linux-gnu/libstdc++-v3/src -L$build_dir/x86_64-pc-linux-gnu/libstdc++-v3/src/.libs -L$build_dir/x86_64-pc-linux-gnu/libstdc++-v3/libsupc++/.libs -B$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/src/.libs -B$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/../libgomp -L$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/../libgomp/.libs -fmessage-length=0 -fno-show-column -ffunction-sections -fdata-sections -g $opt -D_GNU_SOURCE -DLOCALEDIR="." -nostdinc++ -I$build_dir/x86_64-pc-linux-gnu/libstdc++-v3/include/x86_64-pc-linux-gnu -I$build_dir/x86_64-pc-linux-gnu/libstdc++-v3/include -I$src_dir/libstdc++-v3/libsupc++ -I$src_dir/libstdc++-v3/include/backward -I$src_dir/libstdc++-v3/testsuite/util $src -fpar-offload -ltbb -fno-diagnostics-show-caret -Wl,--gc-sections -lm -std=c++17 $* -o $bin
+# -fdump-tree-all
+
+
+

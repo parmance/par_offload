@@ -1,0 +1,9 @@
+#!/bin/sh
+build_dir=$PWD
+src_dir=$build_dir/..
+src=$src_dir/pstl-benchmark/pstl-benchmark.cpp
+exe=./benchmark
+
+export LD_LIBRARY_PATH=$build_dir/gcc:$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/../libgomp/.libs:$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/src/.libs::$build_dir/gcc:$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/../libgomp/.libs:$build_dir/x86_64-pc-linux-gnu/./libstdc++-v3/src/.libs:$LD_LIBRARY_PATH
+$exe
+
