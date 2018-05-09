@@ -31,7 +31,7 @@ struct BrigModuleHeader;
 typedef uint16_t BrigKind16_t;
 typedef uint32_t BrigVersion32_t;
 
-typedef BrigModuleHeader *BrigModule_t;
+typedef struct BrigModuleHeader *BrigModule_t;
 typedef uint32_t BrigDataOffset32_t;
 typedef uint32_t BrigCodeOffset32_t;
 typedef uint32_t BrigOperandOffset32_t;
@@ -886,18 +886,18 @@ struct BrigData
 
 struct BrigDirectiveArgBlock
 {
-  BrigBase base;
+  struct BrigBase base;
 };
 
 struct BrigDirectiveComment
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
 };
 
 struct BrigDirectiveControl
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigControlDirective16_t control;
   uint16_t reserved;
   BrigDataOffsetOperandList32_t operands;
@@ -905,7 +905,7 @@ struct BrigDirectiveControl
 
 struct BrigDirectiveExecutable
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
   uint16_t outArgCount;
   uint16_t inArgCount;
@@ -919,13 +919,13 @@ struct BrigDirectiveExecutable
 
 struct BrigDirectiveExtension
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
 };
 
 struct BrigDirectiveFbarrier
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
   BrigVariableModifier8_t modifier;
   BrigLinkage8_t linkage;
@@ -934,13 +934,13 @@ struct BrigDirectiveFbarrier
 
 struct BrigDirectiveLabel
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
 };
 
 struct BrigDirectiveLoc
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t filename;
   uint32_t line;
   uint32_t column;
@@ -948,7 +948,7 @@ struct BrigDirectiveLoc
 
 struct BrigDirectiveModule
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
   BrigVersion32_t hsailMajor;
   BrigVersion32_t hsailMinor;
@@ -960,24 +960,24 @@ struct BrigDirectiveModule
 
 struct BrigDirectiveNone
 {
-  BrigBase base;
+  struct BrigBase base;
 };
 
 struct BrigDirectivePragma
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetOperandList32_t operands;
 };
 
 struct BrigDirectiveVariable
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t name;
   BrigOperandOffset32_t init;
   BrigType16_t type;
   BrigSegment8_t segment;
   BrigAlignment8_t align;
-  BrigUInt64 dim;
+  struct BrigUInt64 dim;
   BrigVariableModifier8_t modifier;
   BrigLinkage8_t linkage;
   BrigAllocation8_t allocation;
@@ -986,7 +986,7 @@ struct BrigDirectiveVariable
 
 struct BrigInstBase
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigOpcode16_t opcode;
   BrigType16_t type;
   BrigDataOffsetOperandList32_t operands;
@@ -994,14 +994,14 @@ struct BrigInstBase
 
 struct BrigInstAddr
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigSegment8_t segment;
   uint8_t reserved[3];
 };
 
 struct BrigInstAtomic
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigSegment8_t segment;
   BrigMemoryOrder8_t memoryOrder;
   BrigMemoryScope8_t memoryScope;
@@ -1012,19 +1012,19 @@ struct BrigInstAtomic
 
 struct BrigInstBasic
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
 };
 
 struct BrigInstBr
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigWidth8_t width;
   uint8_t reserved[3];
 };
 
 struct BrigInstCmp
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t sourceType;
   BrigAluModifier8_t modifier;
   BrigCompareOperation8_t compare;
@@ -1034,7 +1034,7 @@ struct BrigInstCmp
 
 struct BrigInstCvt
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t sourceType;
   BrigAluModifier8_t modifier;
   BrigRound8_t round;
@@ -1042,7 +1042,7 @@ struct BrigInstCvt
 
 struct BrigInstImage
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t imageType;
   BrigType16_t coordType;
   BrigImageGeometry8_t geometry;
@@ -1052,7 +1052,7 @@ struct BrigInstImage
 
 struct BrigInstLane
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t sourceType;
   BrigWidth8_t width;
   uint8_t reserved;
@@ -1060,7 +1060,7 @@ struct BrigInstLane
 
 struct BrigInstMem
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigSegment8_t segment;
   BrigAlignment8_t align;
   uint8_t equivClass;
@@ -1071,7 +1071,7 @@ struct BrigInstMem
 
 struct BrigInstMemFence
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigMemoryOrder8_t memoryOrder;
   BrigMemoryScope8_t globalSegmentMemoryScope;
   BrigMemoryScope8_t groupSegmentMemoryScope;
@@ -1080,7 +1080,7 @@ struct BrigInstMemFence
 
 struct BrigInstMod
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigAluModifier8_t modifier;
   BrigRound8_t round;
   BrigPack8_t pack;
@@ -1089,7 +1089,7 @@ struct BrigInstMod
 
 struct BrigInstQueryImage
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t imageType;
   BrigImageGeometry8_t geometry;
   BrigImageQuery8_t query;
@@ -1097,14 +1097,14 @@ struct BrigInstQueryImage
 
 struct BrigInstQuerySampler
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigSamplerQuery8_t query;
   uint8_t reserved[3];
 };
 
 struct BrigInstQueue
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigSegment8_t segment;
   BrigMemoryOrder8_t memoryOrder;
   uint16_t reserved;
@@ -1112,14 +1112,14 @@ struct BrigInstQueue
 
 struct BrigInstSeg
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigSegment8_t segment;
   uint8_t reserved[3];
 };
 
 struct BrigInstSegCvt
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t sourceType;
   BrigSegment8_t segment;
   BrigSegCvtModifier8_t modifier;
@@ -1127,7 +1127,7 @@ struct BrigInstSegCvt
 
 struct BrigInstSignal
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t signalType;
   BrigMemoryOrder8_t memoryOrder;
   BrigAtomicOperation8_t signalOperation;
@@ -1135,41 +1135,41 @@ struct BrigInstSignal
 
 struct BrigInstSourceType
 {
-  BrigInstBase base;
+  struct BrigInstBase base;
   BrigType16_t sourceType;
   uint16_t reserved;
 };
 
 struct BrigOperandAddress
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigCodeOffset32_t symbol;
   BrigOperandOffset32_t reg;
-  BrigUInt64 offset;
+  struct BrigUInt64 offset;
 };
 
 struct BrigOperandAlign
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigAlignment8_t align;
   uint8_t reserved[3];
 };
 
 struct BrigOperandCodeList
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetCodeList32_t elements;
 };
 
 struct BrigOperandCodeRef
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigCodeOffset32_t ref;
 };
 
 struct BrigOperandConstantBytes
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigType16_t type;
   uint16_t reserved;
   BrigDataOffsetString32_t bytes;
@@ -1177,21 +1177,21 @@ struct BrigOperandConstantBytes
 
 struct BrigOperandConstantImage
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigType16_t type;
   BrigImageGeometry8_t geometry;
   BrigImageChannelOrder8_t channelOrder;
   BrigImageChannelType8_t channelType;
   uint8_t reserved[3];
-  BrigUInt64 width;
-  BrigUInt64 height;
-  BrigUInt64 depth;
-  BrigUInt64 array;
+  struct BrigUInt64 width;
+  struct BrigUInt64 height;
+  struct BrigUInt64 depth;
+  struct BrigUInt64 array;
 };
 
 struct BrigOperandConstantOperandList
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigType16_t type;
   uint16_t reserved;
   BrigDataOffsetOperandList32_t elements;
@@ -1199,7 +1199,7 @@ struct BrigOperandConstantOperandList
 
 struct BrigOperandConstantSampler
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigType16_t type;
   BrigSamplerCoordNormalization8_t coord;
   BrigSamplerFilter8_t filter;
@@ -1209,26 +1209,26 @@ struct BrigOperandConstantSampler
 
 struct BrigOperandOperandList
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetOperandList32_t elements;
 };
 
 struct BrigOperandRegister
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigRegisterKind16_t regKind;
   uint16_t regNum;
 };
 
 struct BrigOperandString
 {
-  BrigBase base;
+  struct BrigBase base;
   BrigDataOffsetString32_t string;
 };
 
 struct BrigOperandWavesize
 {
-  BrigBase base;
+  struct BrigBase base;
 };
 
 #endif /* HSA_BRIG_FORMAT_H */
