@@ -2554,6 +2554,7 @@ gomp_load_plugin_for_device (struct gomp_device_descr *device,
       DLSYM (async_run);
       DLSYM_OPT (can_run, can_run);
       DLSYM (dev2dev);
+      DLSYM_OPT (direct_invoke, direct_invoke);
     }
   if (device->capabilities & GOMP_OFFLOAD_CAP_OPENACC_200)
     {
@@ -2746,6 +2747,87 @@ gomp_target_init (void)
     gomp_fatal ("atexit failed");
 }
 
+/* Locate GOMP device structure for HSA direct number DEVICE_ID and initialize
+   it if necessary.  Return NULL, if the device with the given index is not
+   found.  */
+
+static struct gomp_device_descr *
+hsadirect_find_init_gomp_device (int device_id)
+{
+  int i, num_devices = gomp_get_num_devices ();
+  struct gomp_device_descr *devicep = NULL;
+
+  for (i = 0; i < num_devices; i++)
+    if (devices[device_id].type == OFFLOAD_TARGET_TYPE_HSA)
+      {
+	if (!device_id)
+	  {
+	    devicep = &devices[i];
+	    break;
+	  }
+	else
+	  device_id--;
+      }
+
+  if (!devicep)
+    return NULL;
+
+  gomp_mutex_lock (&devicep->lock);
+  if (devicep->state == GOMP_DEVICE_UNINITIALIZED)
+    gomp_init_device (devicep);
+  else if (devicep->state == GOMP_DEVICE_FINALIZED)
+    gomp_fatal ("HSA direct device number %i has already been deinitialized",
+		device_id);
+  gomp_mutex_unlock (&devicep->lock);
+  return devicep;
+}
+
+/* Finds an Agent version of the given HOST_FUNC, and return its
+   handle, if found.  Otherwise, returns UINT64_MAX.  */
+
+void *
+GOMP_host_to_device_fptr (int device_id, const void *host_func)
+{
+  struct gomp_device_descr *devicep
+    = hsadirect_find_init_gomp_device (device_id);
+
+  /* If there are no HSA agents, act as there is no handle to
+     allow host execution fall back in the caller.  */
+  if (devicep == NULL)
+    return (void*)UINT64_MAX;
+
+  void *device_func = gomp_get_target_fn_addr (devicep, host_func);
+  if (device_func == NULL)
+    return (void*)UINT64_MAX;
+  else
+    return device_func;
+}
+
+void
+GOMP_direct_invoke_spmd_kernel (int device_id, const char *kernel_name,
+				unsigned x_grid, unsigned x_group,
+				unsigned y_grid, unsigned y_group,
+				unsigned z_grid, unsigned z_group,
+				void *vars,
+				const char *placeholder_func1,
+				const void *hsa_func1,
+				const char *placeholder_func2,
+				const void *hsa_func2,
+				const char *placeholder_func3,
+				const void *hsa_func3,
+				const char *placeholder_func4,
+				const void *hsa_func4)
+{
+  struct gomp_device_descr *devicep
+    = hsadirect_find_init_gomp_device (device_id);
+
+  devicep->direct_invoke_func (devicep->target_id, kernel_name, x_grid, x_group,
+			       y_grid, y_group, z_grid, z_group, vars,
+			       placeholder_func1, hsa_func1,
+			       placeholder_func2, hsa_func2,
+			       placeholder_func3, hsa_func3,
+			       placeholder_func4, hsa_func4);
+}
 #else /* PLUGIN_SUPPORT */
 /* If dlfcn.h is unavailable we always fallback to host execution.
    GOMP_target* routines are just stubs for this case.  */

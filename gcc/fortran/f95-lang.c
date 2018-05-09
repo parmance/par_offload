@@ -623,6 +623,9 @@ gfc_init_builtin_functions (void)
 			     ARG6, ARG7, ARG8, ARG9, ARG10) NAME,
 #define DEF_FUNCTION_TYPE_11(NAME, RETURN, ARG1, ARG2, ARG3, ARG4, ARG5, \
 			     ARG6, ARG7, ARG8, ARG9, ARG10, ARG11) NAME,
+#define DEF_FUNCTION_TYPE_17(NAME, RETURN, ARG1, ARG2, ARG3, ARG4, ARG5, \
+			     ARG6, ARG7, ARG8, ARG9, ARG10, ARG11,	\
+			     ARG12, ARG13, ARG14, ARG15, ARG16, ARG17) NAME,
 #define DEF_FUNCTION_TYPE_VAR_0(NAME, RETURN) NAME,
 #define DEF_FUNCTION_TYPE_VAR_1(NAME, RETURN, ARG1) NAME,
 #define DEF_FUNCTION_TYPE_VAR_2(NAME, RETURN, ARG1, ARG2) NAME,
@@ -645,6 +648,7 @@ gfc_init_builtin_functions (void)
 #undef DEF_FUNCTION_TYPE_9
 #undef DEF_FUNCTION_TYPE_10
 #undef DEF_FUNCTION_TYPE_11
+#undef DEF_FUNCTION_TYPE_17
 #undef DEF_FUNCTION_TYPE_VAR_0
 #undef DEF_FUNCTION_TYPE_VAR_1
 #undef DEF_FUNCTION_TYPE_VAR_2
@@ -1124,6 +1128,30 @@ gfc_init_builtin_functions (void)
 				builtin_types[(int) ARG10],		\
 				builtin_types[(int) ARG11],		\
 				NULL_TREE);
+#define DEF_FUNCTION_TYPE_17(ENUM, RETURN, ARG1, ARG2, ARG3, ARG4, ARG5,\
+			     ARG6, ARG7, ARG8, ARG9, ARG10, ARG11,	\
+			     ARG12, ARG13, ARG14, ARG15, ARG16, ARG17)	\
+  builtin_types[(int) ENUM]						\
+    = build_function_type_list (builtin_types[(int) RETURN],		\
+				builtin_types[(int) ARG1],		\
+				builtin_types[(int) ARG2],		\
+				builtin_types[(int) ARG3],		\
+				builtin_types[(int) ARG4],		\
+				builtin_types[(int) ARG5],		\
+				builtin_types[(int) ARG6],		\
+				builtin_types[(int) ARG7],		\
+				builtin_types[(int) ARG8],		\
+				builtin_types[(int) ARG9],		\
+				builtin_types[(int) ARG10],		\
+				builtin_types[(int) ARG11],		\
+				builtin_types[(int) ARG12],		\
+				builtin_types[(int) ARG13],		\
+				builtin_types[(int) ARG14],		\
+				builtin_types[(int) ARG15],		\
+				builtin_types[(int) ARG16],		\
+				builtin_types[(int) ARG17],		\
+				NULL_TREE);
+
 #define DEF_FUNCTION_TYPE_VAR_0(ENUM, RETURN)				\
   builtin_types[(int) ENUM]						\
     = build_varargs_function_type_list (builtin_types[(int) RETURN],    \
@@ -1177,6 +1205,7 @@ gfc_init_builtin_functions (void)
 #undef DEF_FUNCTION_TYPE_7
 #undef DEF_FUNCTION_TYPE_8
 #undef DEF_FUNCTION_TYPE_10
+#undef DEF_FUNCTION_TYPE_17
 #undef DEF_FUNCTION_TYPE_VAR_0
 #undef DEF_FUNCTION_TYPE_VAR_1
 #undef DEF_FUNCTION_TYPE_VAR_2

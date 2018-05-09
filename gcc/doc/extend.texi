@@ -2308,6 +2308,7 @@ GCC plugins may provide their own attributes.
 * CR16 Function Attributes::
 * Epiphany Function Attributes::
 * H8/300 Function Attributes::
+* HSA Function Attributes::
 * IA-64 Function Attributes::
 * M32C Function Attributes::
 * M32R/D Function Attributes::
@@ -4235,6 +4236,156 @@ all registers except the stack pointer should be saved in the prologue
 regardless of whether they are used or not.
 @end table
 
+@node HSA Function Attributes
+@subsection HSA Function Attributes
+
+These function attributes are supported when compiling certain portion
+of a program to Heterogeneous Systems Architecture Intermediate
+Language (HSAIL) for use with the lightweight ``direct HSA''
+offloading API that can be enabled with @option{-fdirecthsa}.
+
+@table @code
+@item hsa_kernel
+@cindex @code{hsa_kernel} function attribute
+The @code{hsa_kernel} attribute is used to request that the compiler
+compiles the function as an HSA kernel that can be invoked via
+@code{__builtin_GOMP_direct_invoke_spmd_kernel} in programs compiled with
+@option{-fdirecthsa}. The kernel function must have exactly one parameter
+which is a pointer that will point to an argument buffer given as one
+of the arguments to @code{__builtin_GOMP_direct_invoke_spmd_kernel}.
+
+The kernel can be invoked on an heterogeneous device as follows:
+
+@smallexample
+__builtin_GOMP_direct_invoke_spmd_kernel (device_id, kernel_function,
+    hsa_grid_x_size, hsa_group_x_size,
+    hsa_grid_y_size, hsa_group_y_size,
+    hsa_grid_z_size, hsa_group_z_size, actual_argument_pointer,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+@end smallexample
+
+The function returns an integer status with the following meanings:
+0 for successul execution, 1 for a device launch failure with
+a graceful host execution fallback possible, error otherwise.
+
+The list of NULLs in the end of the argument list control a simple
+program specialization mechanism used to avoid indirect calls in the
+target accelerator program.  These arguments can be used to pass
+(currently) up to four pointer pairs that can be used to avoid
+the need to support indirect calls in the heterogeneous device in
+some cases.
+The first pointer in a pair is a ``placeholder function declaration''
+which the kernel function refers to.  The second one is a handle
+of a function in the device the device should actually call.  Before
+launching the kernel, the device binary is specialized (at host
+program runtime) to call the given function instead of the placeholder.
+
+The handle can be a pointer to an object that is used to find the
+actual function address in the device binary (like is the case with
+the current HSA implementation), or even the target function address
+directly.
+
+There is another API called @code{__builtin_GOMP_host_to_device_fptr}
+for retrieving the device side function handle pointer, which can be
+used as follows:
+
+@smallexample
+  void *dev_func_handle
+    = __builtin_GOMP_host_to_device_fptr (0, my_universal_func);
+@end smallexample
+
+The function returns UINT64_MAX in case it didn't find a device
+version of the given function, allowing for a graceful host-side
+fallback.  Note that @code{my_universal_func} must be a ``universal
+function'' marked with the @code{hsa_universal} attribute (see
+below).
+
+A complete example that uses the specialization mechanism to avoid
+indirect calls:
+
+@example
+
+__attribute__((hsa_placeholder))
+int __hsa_callee_placeholder_bin_operation0_________(int a, int b);
+
+__attribute__((hsa_placeholder))
+int __hsa_callee_placeholder_bin_operation1_________(int a, int b);
+
+__attribute__((hsa_universal))
+int adder (int a, int b)
+@{
+  return a + b;
+@}
+
+__attribute__((hsa_universal))
+int subtractor (int a, int b)
+@{
+  return a - b;
+@}
+ __attribute__((hsa_kernel))
+void
+test_kernel (void *args)
+@{
+  int *vals = *(int**)args;
+  size_t i = __builtin_hsa_workitemflatabsid ();
+
+  vals[i] = __hsa_callee_placeholder_bin_operation0_________(i, 1);
+  vals[i] = __hsa_callee_placeholder_bin_operation1_________(vals[i], 1);
+@}
+
+int
+main(int argc, char* argv[])
+@{
+  ...
+
+  void *adder_dev_handle
+    = __builtin_GOMP_host_to_device_fptr (0, adder);
+  VERIFY ((uint64_t)adder_dev_handle != UINT64_MAX);
+
+  void *subtractor_dev_handle
+    = __builtin_GOMP_host_to_device_fptr (0, subtractor);
+  VERIFY ((uint64_t)subtractor_dev_handle != UINT64_MAX);
+
+  int status = __builtin_GOMP_direct_invoke_spmd_kernel
+    (0, (void*)test_kernel, DIM, 0, DIM, 0, DIM, 0, &arg,
+     (void*)__hsa_callee_placeholder_bin_operation0,
+     adder_dev_handle,
+     (void*)__hsa_callee_placeholder_bin_operation1,
+     subtractor_dev_handle,
+     NULL, NULL, NULL, NULL);
+  ...
+@}
+
+@end example
+
+Note that the placeholder function's naming matters.  Its prefix must
+be @code{__hsa_callee_placeholder_} and its name should be long
+enough to contain the names of the actual callee functions.  This
+is because some indirect call specialization implementations might use
+binary patching to replace the indirect callee with a direct one.
+This is the case with the BRIG/HSAIL implementation currently.
+
+@item hsa_function
+@cindex @code{hsa_function} function attribute
+The @code{hsa_function} requests that the function is compiled into an
+HSA function that is only callable by other HSA functions and HSA kernels,
+and not compiled to a host function.  The function can thus call
+HSAIL-specific builtin functions.
+
+@item hsa_universal
+@cindex @code{hsa_universal} function attribute
+The @code{hsa_universal} attribute requests that the function should
+be compiled both into an HSAIL function that is callable by other HSA
+functions and HSA kernels, and to a host function.  As they must be
+compilable also to native host functions, the functions marked with
+this attribute must not call HSAIL builtins.
+
+``Universal functions'' provide also a means for finding device functions
+using host function pointers in the indirect call specialization
+mechanism as described in the documentation of the ``hsa_kernel'' attribute.
+
+@end table
+
 @node IA-64 Function Attributes
 @subsection IA-64 Function Attributes
 
@@ -5905,6 +6056,7 @@ attributes.
 * AVR Variable Attributes::
 * Blackfin Variable Attributes::
 * H8/300 Variable Attributes::
+* HSA Variable Attributes::
 * IA-64 Variable Attributes::
 * M32R/D Variable Attributes::
 * MeP Variable Attributes::
@@ -6491,6 +6643,22 @@ The compiler generates more efficient code for loads and stores
 on data in the tiny data section.  Note the tiny data area is limited to
 slightly under 32KB of data.
 
+@end table
+
+@node HSA Variable Attributes
+@subsection HSA Variable Attributes
+
+Offloading to to Heterogeneous Systems Architecture Intermediate
+Language (HSAIL) supports the following variable attribute:
+
+@table @code
+@item hsa_group_segment
+@cindex @code{hsa_group_segment} variable attribute
+This attribute specifies that the variable should be placed into the
+group HSA segment.  The variable must have static allocation.  Note
+that this attribute is an experimental feature of the HSA branch and
+the invocation of kernels might change significantly when (and if
+ever) it is up-streamed.
 @end table
 
 @node IA-64 Variable Attributes

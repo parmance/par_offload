@@ -174,7 +174,7 @@ in the following sections.
 -pass-exit-codes  -pipe  -specs=@var{file}  -wrapper  @gol
 @@@var{file}  -ffile-prefix-map=@var{old}=@var{new}  @gol
 -fplugin=@var{file}  -fplugin-arg-@var{name}=@var{arg}  @gol
--fdump-ada-spec@r{[}-slim@r{]}  -fada-spec-parent=@var{unit}  -fdump-go-spec=@var{file}}
+-fdump-ada-spec@r{[}-slim@r{]}  -fada-spec-parent=@var{unit}  -fdump-go-spec=@var{file} -fdirecthsa}
 
 @item C Language Options
 @xref{C Dialect Options,,Options Controlling C Dialect}.
@@ -1752,6 +1752,11 @@ declarations in @var{file}.  This generates Go @code{const},
 @code{type}, @code{var}, and @code{func} declarations which may be a
 useful way to start writing a Go interface to code written in some
 other language.
+
+@item -fdirecthsa
+@opindex fdirecthsa
+Compile marked functions Heterogeneous Systems Architecture
+Intermediate Language (HSAIL).
 
 @include @value{srcdir}/../libiberty/at-file.texi
 @end table

@@ -1,4 +1,4 @@
-/* Plugin for HSAIL execution.
+/* Plugin for HSA execution.
 
    Copyright (C) 2013-2018 Free Software Foundation, Inc.
 
@@ -35,11 +35,40 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <hsa.h>
+#include <assert.h>
 #include <plugin/hsa_ext_finalize.h>
 #include <dlfcn.h>
+#include <time.h>
+
 #include "libgomp-plugin.h"
 #include "gomp-constants.h"
-#include "secure_getenv.h"
+#include "hsa-brig-format.h"
+
+/* Secure getenv() which returns NULL if running as SUID/SGID.  */
+#ifndef HAVE_SECURE_GETENV
+#ifdef HAVE___SECURE_GETENV
+#define secure_getenv __secure_getenv
+#elif defined (HAVE_UNISTD_H) && defined(HAVE_GETUID) && defined(HAVE_GETEUID) \
+  && defined(HAVE_GETGID) && defined(HAVE_GETEGID)
+
+#include <unistd.h>
+
+/* Implementation of secure_getenv() for targets where it is not provided but
+   we have at least means to test real and effective IDs. */
+
+static char *
+secure_getenv (const char *name)
+{
+  if ((getuid () == geteuid ()) && (getgid () == getegid ()))
+    return getenv (name);
+  else
+    return NULL;
+}
+
+#else
+#define secure_getenv getenv
+#endif
+#endif
 
 /* As an HSA runtime is dlopened, following structure defines function
    pointers utilized by the HSA plug-in.  */
@@ -227,6 +256,8 @@ static const char *hsa_runtime_lib;
 
 static bool support_cpu_devices;
 
+static bool inmemory_kernel_cache;
+
 /* Initialize debug and suppress_host_fallback according to the environment.  */
 
 static void
@@ -242,11 +273,16 @@ init_enviroment_variables (void)
   else
     suppress_host_fallback = false;
 
+  if (secure_getenv ("HSA_NO_INMEMORY_KERNEL_CACHE"))
+    inmemory_kernel_cache = false;
+  else
+    inmemory_kernel_cache = true;
+
   hsa_runtime_lib = secure_getenv ("HSA_RUNTIME_LIB");
   if (hsa_runtime_lib == NULL)
     hsa_runtime_lib = HSA_RUNTIME_LIB "libhsa-runtime64.so";
 
-  support_cpu_devices = secure_getenv ("HSA_SUPPORT_CPU_DEVICES");
+  support_cpu_devices = !secure_getenv ("HSA_NO_CPU_AGENTS");
 }
 
 /* Print a logging message with PREFIX to stderr if HSA_DEBUG value
@@ -310,13 +346,14 @@ hsa_error (const char *str, hsa_status_t status)
   return false;
 }
 
-struct hsa_kernel_description
+struct hsa_function_description
 {
   const char *name;
   unsigned omp_data_size;
+  bool kernel_p;
   bool gridified_kernel_p;
-  unsigned kernel_dependencies_count;
-  const char **kernel_dependencies;
+  unsigned function_dependencies_count;
+  const char **function_dependencies;
 };
 
 struct global_var_info
@@ -331,31 +368,42 @@ struct global_var_info
 struct brig_image_desc
 {
   hsa_ext_module_t brig_module;
-  const unsigned kernel_count;
-  struct hsa_kernel_description *kernel_infos;
+  const unsigned function_count;
+  struct hsa_function_description *function_infos;
   const unsigned global_variable_count;
   struct global_var_info *global_variables;
+  /* Functions/kernels that do not have a host-side version.  */
+  const unsigned hsa_only_function_count;
+  struct hsa_function_description *hsa_only_function_infos;
 };
 
 struct agent_info;
 
-/* Information required to identify, finalize and run any given kernel.  */
+/* Information required to identify functions, and finalize and run kernel
+   functions.  */
 
-struct kernel_info
+struct function_info
 {
-  /* Name of the kernel, required to locate it within the brig module.  */
+  /* Name of the function, required to locate it within the BRIG module.  */
   const char *name;
+  /* True if the function is a kernel.  */
+  bool kernel_p;
   /* Size of memory space for OMP data.  */
   unsigned omp_data_size;
   /* The specific agent the kernel has been or will be finalized for and run
      on.  */
   struct agent_info *agent;
-  /* The specific module where the kernel takes place.  */
+  /* The module where the function resides.  */
   struct module_info *module;
   /* Mutex enforcing that at most once thread ever initializes a kernel for
      use.  A thread should have locked agent->modules_rwlock for reading before
      acquiring it.  */
   pthread_mutex_t init_mutex;
+  /* Because the function_info is used to pass executable binary handles,
+     we need to hold a mutex on it until the kernel has been launched because
+     we can specialize the same kernel and produce multiple different
+     binaries.  TODO: fix this by passing the object separately.  */
+  pthread_mutex_t use_mutex;
   /* Flag indicating whether the kernel has been initialized and all fields
      below it contain valid data.  */
   bool initialized;
@@ -363,13 +411,14 @@ struct kernel_info
   bool initialization_failed;
   /* The object to be put into the dispatch queue.  */
   uint64_t object;
+  /* For kernels:  */
   /* Required size of kernel arguments.  */
   uint32_t kernarg_segment_size;
   /* Required size of group segment.  */
   uint32_t group_segment_size;
   /* Required size of private segment.  */
   uint32_t private_segment_size;
-  /* List of all kernel dependencies.  */
+  /* List of all function dependencies.  */
   const char **dependencies;
   /* Number of dependencies.  */
   unsigned dependencies_count;
@@ -379,7 +428,7 @@ struct kernel_info
   bool gridified_kernel_p;
 };
 
-/* Information about a particular brig module, its image and kernels.  */
+/* Information about a particular brig module, its image and its functions.  */
 
 struct module_info
 {
@@ -388,11 +437,11 @@ struct module_info
   /* The description with which the program has registered the image.  */
   struct brig_image_desc *image_desc;
 
-  /* Number of kernels in this module.  */
-  int kernel_count;
-  /* An array of kernel_info structures describing each kernel in this
+  /* Number of functions (or kernels) in this module.  */
+  int function_count;
+  /* An array of function_info structures describing each function in this
      module.  */
-  struct kernel_info kernels[];
+  struct function_info functions[];
 };
 
 /* Information about shared brig library.  */
@@ -403,12 +452,33 @@ struct brig_library_info
   hsa_ext_module_t image;
 };
 
+/* Maximum number of function specializations.  */
+#define DECL_REPL_N GOMP_TARGET_HSA_MAX_BRIG_FUNC_DECL_REPL
+/* An entry in the specialized finalization result cache.  */
+struct exec_cache_entry
+{
+  /* The kernel the executable was finalized/specialized for.  */
+  const struct function_info *kernel;
+  /* The placeholder functions and their replacements used in
+     the specialization.  */
+  const char *decl_repl[DECL_REPL_N*2];
+  /* The previously finalized HSA executable.  */
+  hsa_executable_t executable;
+  /* Whether the program was finalized, but with a failure.  */
+  bool finalization_error;
+  /* For linked list.  */
+  struct exec_cache_entry *next;
+};
+
+
 /* Description of an HSA GPU agent and the program associated with it.  */
 
 struct agent_info
 {
   /* The HSA ID of the agent.  Assigned when hsa_context is initialized.  */
   hsa_agent_t id;
+  /* If the Agent uses the phsa-runtime and gcc BRIGFE.  */
+  bool is_phsa;
   /* Whether the agent has been initialized.  The fields below are usable only
      if it has been.  */
   bool initialized;
@@ -420,6 +490,11 @@ struct agent_info
   hsa_queue_t *kernel_dispatch_command_q;
   /* The HSA memory region from which to allocate kernel arguments.  */
   hsa_region_t kernarg_region;
+  /* The maximum number of work-items in the different dimensions of
+     a work-group.  */
+  uint16_t max_wg_dim[3];
+  /* The maximum total number of work-items in a work-group.  */
+  uint32_t max_wg_wis;
 
   /* Read-write lock that protects kernels which are running or about to be run
      from interference with loading and unloading of images.  Needs to be
@@ -430,21 +505,28 @@ struct agent_info
      kernel.  */
   struct module_info *first_module;
 
-  /* Mutex enforcing that only one thread will finalize the HSA program.  A
-     thread should have locked agent->modules_rwlock for reading before
+  /* Mutex enforcing that only one thread will finalize the HSA program.
+     A thread should have locked agent->modules_rwlock for reading before
      acquiring it.  */
   pthread_mutex_t prog_mutex;
-  /* Flag whether the HSA program that consists of all the modules has been
-     finalized.  */
-  bool prog_finalized;
-  /* Flag whether the program was finalized but with a failure.  */
-  bool prog_finalized_error;
-  /* HSA executable - the finalized program that is used to locate kernels.  */
-  hsa_executable_t executable;
+
   /* List of BRIG libraries.  */
   struct brig_library_info **brig_libraries;
   /* Number of loaded shared BRIG libraries.  */
   unsigned brig_libraries_count;
+
+  /* Whether a program was attempted to be finalized, but failed.  */
+  bool finalization_error;
+  /* Whether a program has been finalized.  */
+  bool finalized;
+
+  /* The previously used HSA executable.  */
+  hsa_executable_t executable;
+
+  /* Cache of finalized executables for different specialization
+     instances.  Currently a linked list as assuming not huge
+     number of entries to scan.  */
+  struct exec_cache_entry *exec_cache;
 };
 
 /* Information about the whole HSA environment and all of its agents.  */
@@ -513,17 +595,16 @@ init_hsa_runtime_functions (void)
 
 /* Find kernel for an AGENT by name provided in KERNEL_NAME.  */
 
-static struct kernel_info *
-get_kernel_for_agent (struct agent_info *agent, const char *kernel_name)
+static struct function_info *
+get_function_for_agent (struct agent_info *agent, const char *func_name)
 {
   struct module_info *module = agent->first_module;
 
   while (module)
     {
-      for (unsigned i = 0; i < module->kernel_count; i++)
-	if (strcmp (module->kernels[i].name, kernel_name) == 0)
-	  return &module->kernels[i];
-
+      for (unsigned i = 0; i < module->function_count; i++)
+	if (strcmp (module->functions[i].name, func_name) == 0)
+	  return &module->functions[i];
       module = module->next;
     }
 
@@ -726,10 +807,37 @@ GOMP_OFFLOAD_init_device (int n)
   if (status != HSA_STATUS_SUCCESS)
     return hsa_error ("Error requesting maximum queue size of the HSA agent",
     	   	      status);
+
+  char name[64];
+
+  status = hsa_fns.hsa_agent_get_info_fn (agent->id,
+					  HSA_AGENT_INFO_NAME,
+					  &name);
+
+  if (status != HSA_STATUS_SUCCESS)
+    return hsa_error ("Error querying the vendor name of the agent", status);
+
+  agent->is_phsa = (strncmp(name, "phsa ", 5) == 0);
+
   status = hsa_fns.hsa_agent_get_info_fn (agent->id, HSA_AGENT_INFO_ISA,
 					  &agent->isa);
   if (status != HSA_STATUS_SUCCESS)
     return hsa_error ("Error querying the ISA of the agent", status);
+
+  status = hsa_fns.hsa_agent_get_info_fn (agent->id,
+					  HSA_AGENT_INFO_WORKGROUP_MAX_DIM,
+					  &agent->max_wg_dim[0]);
+  if (status != HSA_STATUS_SUCCESS)
+    return hsa_error ("Error querying the max work-group dimensions of "
+		      "the agent", status);
+
+  status = hsa_fns.hsa_agent_get_info_fn (agent->id,
+					  HSA_AGENT_INFO_WORKGROUP_MAX_SIZE,
+					  &agent->max_wg_wis);
+  if (status != HSA_STATUS_SUCCESS)
+    return hsa_error ("Error querying the max work-group size of the agent",
+		      status);
+
   status = hsa_fns.hsa_queue_create_fn (agent->id, queue_size,
 					HSA_QUEUE_TYPE_MULTI,
 					queue_callback, NULL, UINT32_MAX,
@@ -756,9 +864,9 @@ GOMP_OFFLOAD_init_device (int n)
 			 "arguments");
       return false;
     }
-  HSA_DEBUG ("HSA agent initialized, queue has id %llu\n",
-	     (long long unsigned) agent->command_q->id);
-  HSA_DEBUG ("HSA agent initialized, kernel dispatch queue has id %llu\n",
+  HSA_DEBUG ("HSA agent (%p) initialized, queue has id %llu\n",
+	     agent, (long long unsigned) agent->command_q->id);
+  HSA_DEBUG ("HSA kernel dispatch queue has id %llu\n",
 	     (long long unsigned) agent->kernel_dispatch_command_q->id);
   agent->initialized = true;
   return true;
@@ -777,7 +885,7 @@ get_agent_info (int n)
     }
   if (n >= hsa_context.agent_count)
     {
-      GOMP_PLUGIN_error ("Request to operate on anon-existing HSA device %i", n);
+      GOMP_PLUGIN_error ("Request to operate on a non-existing HSA device %i", n);
       return NULL;
     }
   if (!hsa_context.agents[n].initialized)
@@ -820,44 +928,60 @@ remove_module_from_agent (struct agent_info *agent, struct module_info *module)
 static bool
 destroy_hsa_program (struct agent_info *agent)
 {
-  if (!agent->prog_finalized || agent->prog_finalized_error)
-    return true;
-
   hsa_status_t status;
 
   HSA_DEBUG ("Destroying the current HSA program.\n");
 
-  status = hsa_fns.hsa_executable_destroy_fn (agent->executable);
-  if (status != HSA_STATUS_SUCCESS)
-    return hsa_error ("Could not destroy HSA executable", status);
+  struct exec_cache_entry *entry = agent->exec_cache;
+  while (entry != NULL)
+    {
+      struct exec_cache_entry *current = entry;
+      if (!entry->finalization_error)
+	{
+	  status = hsa_fns.hsa_executable_destroy_fn (entry->executable);
+	  if (status != HSA_STATUS_SUCCESS)
+	    return hsa_error ("Could not destroy HSA executable", status);
+	}
+      entry = entry->next;
+      current->next = NULL;
+      free (current);
+    }
+  agent->exec_cache = NULL;
+
+  if (!inmemory_kernel_cache && agent->finalized)
+    {
+      status = hsa_fns.hsa_executable_destroy_fn (agent->executable);
+      if (status != HSA_STATUS_SUCCESS)
+	return hsa_error ("Could not destroy HSA executable", status);
+    }
 
   struct module_info *module;
   for (module = agent->first_module; module; module = module->next)
     {
       int i;
-      for (i = 0; i < module->kernel_count; i++)
-	module->kernels[i].initialized = false;
+      for (i = 0; i < module->function_count; i++)
+	module->functions[i].initialized = false;
     }
-  agent->prog_finalized = false;
   return true;
 }
 
-/* Initialize KERNEL from D and other parameters.  Return true on success. */
+/* Initialize FUNCTION from D and other parameters.  Return true on success. */
 
 static bool
-init_basic_kernel_info (struct kernel_info *kernel,
-			struct hsa_kernel_description *d,
-			struct agent_info *agent,
-			struct module_info *module)
+init_basic_function_info (struct function_info *function,
+			  struct hsa_function_description *d,
+			  struct agent_info *agent,
+			  struct module_info *module)
 {
-  kernel->agent = agent;
-  kernel->module = module;
-  kernel->name = d->name;
-  kernel->omp_data_size = d->omp_data_size;
-  kernel->gridified_kernel_p = d->gridified_kernel_p;
-  kernel->dependencies_count = d->kernel_dependencies_count;
-  kernel->dependencies = d->kernel_dependencies;
-  if (pthread_mutex_init (&kernel->init_mutex, NULL))
+  function->agent = agent;
+  function->module = module;
+  function->name = d->name;
+  function->omp_data_size = d->omp_data_size;
+  function->kernel_p = d->kernel_p;
+  function->gridified_kernel_p = d->gridified_kernel_p;
+  function->dependencies_count = d->function_dependencies_count;
+  function->dependencies = d->function_dependencies;
+  if (pthread_mutex_init (&function->init_mutex, NULL))
     {
       GOMP_PLUGIN_error ("Failed to initialize an HSA kernel mutex");
       return false;
@@ -866,18 +990,20 @@ init_basic_kernel_info (struct kernel_info *kernel,
 }
 
 /* Part of the libgomp plugin interface.  Load BRIG module described by struct
-   brig_image_desc in TARGET_DATA and return references to kernel descriptors
+   brig_image_desc in TARGET_DATA and return references to function descriptors
    in TARGET_TABLE.  */
 
 int
 GOMP_OFFLOAD_load_image (int ord, unsigned version, const void *target_data,
 			 struct addr_pair **target_table)
 {
-  if (GOMP_VERSION_DEV (version) > GOMP_VERSION_HSA)
+  unsigned dev_version = GOMP_VERSION_DEV (version);
+  if (dev_version != GOMP_VERSION_HSA
+      && dev_version > (GOMP_VERSION_HSA & ~(1<<15)))
     {
       GOMP_PLUGIN_error ("Offload data incompatible with HSA plugin"
 			 " (expected %u, received %u)",
-			 GOMP_VERSION_HSA, GOMP_VERSION_DEV (version));
+			 GOMP_VERSION_HSA, dev_version);
       return -1;
     }
 
@@ -885,8 +1011,17 @@ GOMP_OFFLOAD_load_image (int ord, unsigned version, const void *target_data,
   struct agent_info *agent;
   struct addr_pair *pair;
   struct module_info *module;
-  struct kernel_info *kernel;
-  int kernel_count = image_desc->kernel_count;
+  struct function_info *function;
+  int host_mapped_function_count = image_desc->function_count;
+  int hsa_only_function_count;
+
+  if (dev_version == GOMP_VERSION_HSA)
+    hsa_only_function_count = image_desc->hsa_only_function_count;
+  else
+    hsa_only_function_count = 0;
+
+  int total_function_count
+    = host_mapped_function_count + hsa_only_function_count;
 
   agent = get_agent_info (ord);
   if (!agent)
@@ -897,32 +1032,45 @@ GOMP_OFFLOAD_load_image (int ord, unsigned version, const void *target_data,
       GOMP_PLUGIN_error ("Unable to write-lock an HSA agent rwlock");
       return -1;
     }
-  if (agent->prog_finalized
-      && !destroy_hsa_program (agent))
+  if (!destroy_hsa_program (agent))
     return -1;
 
-  HSA_DEBUG ("Encountered %d kernels in an image\n", kernel_count);
-  pair = GOMP_PLUGIN_malloc (kernel_count * sizeof (struct addr_pair));
+  HSA_DEBUG ("Encountered %d mapped and %d HSA-only functions in the "
+	     "image\n", host_mapped_function_count, hsa_only_function_count);
+  pair = GOMP_PLUGIN_malloc (host_mapped_function_count * sizeof (struct addr_pair));
   *target_table = pair;
   module = (struct module_info *)
     GOMP_PLUGIN_malloc_cleared (sizeof (struct module_info)
-				+ kernel_count * sizeof (struct kernel_info));
+				+ (total_function_count
+				   * sizeof (struct function_info)));
   module->image_desc = image_desc;
-  module->kernel_count = kernel_count;
+  module->function_count = total_function_count;
 
-  kernel = &module->kernels[0];
+  function = &module->functions[0];
 
-  /* Allocate memory for kernel dependencies.  */
-  for (unsigned i = 0; i < kernel_count; i++)
+  for (unsigned i = 0; i < host_mapped_function_count; i++)
     {
-      pair->start = (uintptr_t) kernel;
-      pair->end = (uintptr_t) (kernel + 1);
+      pair->start = (uintptr_t) function;
+      pair->end = (uintptr_t) (function + 1);
 
-      struct hsa_kernel_description *d = &image_desc->kernel_infos[i];
-      if (!init_basic_kernel_info (kernel, d, agent, module))
+      struct hsa_function_description *d = &image_desc->function_infos[i];
+      if (!init_basic_function_info (function, d, agent, module))
 	return -1;
-      kernel++;
+      HSA_DEBUG ("Initialized host-mapped function with name '%s' "
+		 "to info struct %p\n", function->name, function);
+      function++;
       pair++;
+    }
+  for (unsigned i = 0; i < hsa_only_function_count; i++)
+    {
+      struct hsa_function_description *d
+	= &image_desc->hsa_only_function_infos[i];
+      if (!init_basic_function_info (function, d, agent, module))
+	return -1;
+      HSA_DEBUG ("Initialized HSA-only function with name '%s' to info "
+		 "struct %p\n", function->name, function);
+
+      function++;
     }
 
   add_module_to_agent (agent, module);
@@ -931,7 +1079,7 @@ GOMP_OFFLOAD_load_image (int ord, unsigned version, const void *target_data,
       GOMP_PLUGIN_error ("Unable to unlock an HSA agent rwlock");
       return -1;
     }
-  return kernel_count;
+  return host_mapped_function_count;
 }
 
 /* Add a shared BRIG library from a FILE_NAME to an AGENT.  */
@@ -942,6 +1090,9 @@ add_shared_library (const char *file_name, struct agent_info *agent)
   struct brig_library_info *library = NULL;
 
   void *f = dlopen (file_name, RTLD_NOW);
+  if (f == NULL)
+    return NULL;
+
   void *start = dlsym (f, "__brig_start");
   void *end = dlsym (f, "__brig_end");
 
@@ -978,10 +1129,471 @@ release_agent_shared_libraries (struct agent_info *agent)
   free (agent->brig_libraries);
 }
 
-/* Create and finalize the program consisting of all loaded modules.  */
+/* Specializes the given BRIG module by utilizing finalization/launch
+   time runtime information, assuming finalization is performed just
+   prior the execution.
 
-static void
-create_and_finalize_hsa_program (struct agent_info *agent)
+   First, it replaces calls to placeholder forward declarations with
+   runtime-known function definitions.  This is used to fix the BRIG
+   to avoid the need for HSA execution time resolved indirect calls.
+   It also makes the BRIG easier optimizable during finalization,
+   especially regarding vectorization.
+
+   MODULE is the original BRIG to modify, MODIFIED_MODULE will be
+   a clone of the module with the replacements fixed (can be NULL,
+   if no modifications were done), REPLACEMENTS is a list of function
+   info-function info pairs with the first being the declaration to
+   replace, and the second the name to replace it with. The list is
+   ended with a NULL.  If KERNEL_NAME is defined, all other kernels
+   are pruned off from the BRIG image.  It must be defined in case
+   the image can contain unresolved placeholder declarations referred
+   to by other kernels that are not yet invoked.
+
+   Returns 1 in case the replacements was performed correctly
+   (in that case MODIFIED_MODULE is non-null and should be deleted
+   after use), and 0 in case of a failure.
+*/
+
+/* A magic string used to detect placeholder function declarations from
+   their names.  */
+
+#define HSA_CALLEE_PLACEHOLDER_MAGIC_STR "__hsa_callee_placeholder_"
+
+static int
+specialize_brig (hsa_ext_module_t module, hsa_ext_module_t *modified_module,
+		 const char **replacements,
+		 const char *kernel_name)
+{
+  if (replacements == NULL)
+    return 1;
+
+  int nrepl = 0;
+  while (replacements [nrepl] != NULL && replacements [nrepl + 1] != NULL)
+    nrepl += 2;
+
+  nrepl /= 2;
+
+  if (nrepl == 0)
+    return 1;
+
+  int ret_val = 1;
+
+  struct BrigModuleHeader *mheader = (struct BrigModuleHeader *) module;
+  char *brig_blob = (char*) module;
+  *modified_module = NULL;
+
+  char *code_section = NULL;
+  size_t code_section_size = 0;
+
+  char *data_section = NULL;
+  size_t data_section_size = 0;
+
+  char *operand_section = NULL;
+  size_t operand_section_size = 0;
+
+  for (uint32_t sec = 0; sec < mheader->sectionCount; ++sec)
+    {
+      uint64_t offset
+	= ((const uint64_t *) ((char*)mheader
+			       + mheader->sectionIndex))[sec];
+
+      struct BrigSectionHeader *section_header
+	= (struct BrigSectionHeader *) (brig_blob + offset);
+
+      if (sec == BRIG_SECTION_INDEX_DATA &&
+	  strncmp((const char*)section_header->name, "hsa_data", 8) == 0)
+	{
+	  data_section = (char *) section_header;
+	  data_section_size = section_header->byteCount;
+	}
+      else if (sec == BRIG_SECTION_INDEX_OPERAND
+	       && strncmp((const char*) section_header->name,
+			  "hsa_operand", 11) == 0)
+	{
+	  operand_section = (char *) section_header;
+	  operand_section_size = section_header->byteCount;
+	}
+      else if (sec == BRIG_SECTION_INDEX_CODE
+	       && strncmp((const char*) section_header->name,
+			  "hsa_code", 8) == 0)
+	{
+	  code_section = (char *) section_header;
+	  code_section_size = section_header->byteCount;
+	}
+    }
+
+  if (data_section == NULL || operand_section == NULL || code_section == NULL
+      || data_section_size == 0 || operand_section_size == 0
+      || code_section_size == 0)
+    {
+      HSA_DEBUG ("Could not find the standard BRIG sections. Corrupted BRIG?");
+      return 0;
+    }
+
+#ifdef DEBUG_BRIG_SPECIALIZATION
+  FILE *startdump = fopen("before-spec.brig", "w+");
+  fwrite (module, 1, mheader->byteCount, startdump);
+  fclose (startdump);
+#endif
+
+  /* There are two cases here when fixing the references to the place holder
+     function declaration to call the concrete function:
+
+     1) There is no definition of the targeted function later in the BRIG
+     module.  In that case patch the declaration name in data_section to
+     match the targeted definition so it will be found later when the BRIG
+     that defines the function is linked in.
+
+     2) There is a later definition to the targeted function.  BRIG specs
+     require that if there are both a declaration and a definition of a
+     function in the same BRIG, the call always refers to the definition.
+     In this case we fix the operand of the call to refer to the
+     definition instead of the placeholder function.
+  */
+
+  struct func_resolution_data {
+    const char *placeholder_name;
+    size_t placeholder_name_len;
+    const char *replacement_name;
+    size_t replacement_name_len;
+    struct BrigDirectiveExecutable *replacement_def;
+    struct BrigDirectiveExecutable *placeholder_decl;
+  };
+
+  struct func_resolution_data *rdata
+    = malloc (sizeof (struct func_resolution_data) * nrepl);
+
+  for (int i = 0; i < nrepl; ++i)
+    {
+      rdata [i].placeholder_name = replacements [i * 2];
+      rdata [i].placeholder_name_len = strlen (rdata [i].placeholder_name);
+      rdata [i].replacement_name = replacements [i * 2 + 1];
+      rdata [i].replacement_name_len = strlen (rdata [i].replacement_name);
+      rdata [i].replacement_def = NULL;
+      rdata [i].placeholder_decl = NULL;
+    }
+
+
+  /* Macro for clone the module to a mutable one.  Executed when we know
+     that there is a need for modifications.  */
+#define CLONE_MODULE							\
+  do {									\
+    if (*modified_module == NULL)					\
+      {									\
+	*modified_module = (hsa_ext_module_t)				\
+	  GOMP_PLUGIN_malloc (mheader->byteCount);			\
+	memcpy (*modified_module, module, mheader->byteCount);		\
+      }									\
+  } while (0)
+
+  /* Macro to convert an address in the original (read only) module to
+     one in the modifiable cloned one.  */
+#define ADDR_IN_CLONE(ORIG_ADDR)					\
+  ((char*)*modified_module + ((char*)(ORIG_ADDR) - (char*)module))
+
+  /* Pass through the code section and find the possible definitions for
+     the target functions to implement (2).  */
+
+  int nreplacement_defs = 0;
+  int nplaceholder_decls = 0;
+
+  struct BrigSectionHeader *code_section_header
+    = (struct BrigSectionHeader *) code_section;
+
+  for (uint32_t pos = code_section_header->headerByteCount;
+       pos < code_section_size; )
+    {
+      struct BrigBase *element = (struct BrigBase *) (code_section + pos);
+
+      struct BrigDirectiveExecutable *func
+	= (struct BrigDirectiveExecutable *) element;
+
+      struct BrigData *name
+	= (struct BrigData *) (data_section + func->name);
+
+      if (func->base.kind != BRIG_KIND_DIRECTIVE_FUNCTION)
+	{
+	  pos += element->byteCount;
+	  continue;
+	}
+
+      if (func->modifier & BRIG_EXECUTABLE_DEFINITION)
+	{
+	  /* Check if we found a definition for one of the callees.  */
+	  for (int i = 0; i < nrepl; ++i)
+	    {
+	      struct func_resolution_data *rd = &rdata [i];
+	      if (rd->replacement_def != NULL
+		  || name->byteCount != rd->replacement_name_len
+		  || strncmp ((char*) name->bytes, rd->replacement_name,
+			      rd->replacement_name_len) != 0)
+		continue;
+
+	      rd->replacement_def = func;
+
+	      HSA_DEBUG ("Found a definition for '%s'\n",
+			 rd->replacement_name);
+	      ++nreplacement_defs;
+	      break;
+	    }
+	}
+      else
+	{
+	  /* Check if we found a placeholder decl.  */
+	  bool specialized_placeholder_found = false;
+	  for (int i = 0; i < nrepl; ++i)
+	    {
+	      struct func_resolution_data *rd = &rdata [i];
+	      if (strncmp ((char*) name->bytes, rd->placeholder_name,
+			   rd->placeholder_name_len) != 0)
+		continue;
+
+	      rd->placeholder_decl = func;
+
+	      HSA_DEBUG ("Found a placeholder decl for '%s'\n",
+			 rd->placeholder_name);
+	      ++nplaceholder_decls;
+	      specialized_placeholder_found = true;
+	    }
+
+  /* If we found a placeholder decl for a kernel that we are not currently
+     specializing for, we change it to an (empty) definition to avoid
+     invalid kernels in the BRIG file as the other kernels refer the to
+     the dummy placeholder with call instructions.
+
+     This must be done because the offload infra collects all the kernels
+     in translation units to a single BRIG, which means that there can
+     be multiple kernels with different placeholder function parameters
+     referring to functions which were generated using template
+     specialization.
+
+     Thus, the placeholder-to-concrete-function mappings are known only
+     at (per) kernel launch time, which means that the kernels that
+     were not called (and thus not specialized) in this call site
+     refer to placeholder declarations which do not have definitions,
+     leading to invalid BRIGs.
+
+     We cannot initially have placeholder function definitions instead of
+     declarations either because then, due to us replacing the definitions
+     name to the concrete callee, there would be multiple definitions
+     with the same name (the placeholder and the callee).
+
+     There might not be a clean way to implement this type of "specialization"
+     other than doing this at "BRIG linkage time" and create a new fully linked
+     BRIG with all the placeholders fixed to the concrete concrete functions and
+     uncalled kernels removed, but there is no BRIG linker at the moment, and
+     it would slowdown the launch.  We don't want to use an icall as then
+     all STL functor inputting kernels will have at least one indirect function
+     call which hinders optimizations.  Also 'icall' is a Full Profile feature
+     for what it matters.
+
+     It's an ugly hack, yes, but it's better to have fast end result.  */
+	  if (!specialized_placeholder_found &&
+	      memmem ((char*) name->bytes, name->byteCount,
+		      HSA_CALLEE_PLACEHOLDER_MAGIC_STR,
+		      strlen (HSA_CALLEE_PLACEHOLDER_MAGIC_STR)) != NULL)
+	    {
+
+	      CLONE_MODULE;
+
+	      struct BrigDirectiveExecutable *rfunc
+		= (struct BrigDirectiveExecutable *)
+		ADDR_IN_CLONE (func);
+
+	      rfunc->modifier |= BRIG_EXECUTABLE_DEFINITION;
+
+	      HSA_DEBUG ("Converted a placeholder decl to a def for '%s'\n",
+			 (char*)name->bytes);
+
+	      /* In function definitions, the argument variables must
+		 have function linkage.  */
+	      if (rfunc->outArgCount == 1)
+		{
+		  struct BrigDirectiveVariable *retVal
+		    = (struct BrigDirectiveVariable *) ADDR_IN_CLONE
+		    ((char*)func + rfunc->base.byteCount);
+		  retVal->linkage = BRIG_LINKAGE_FUNCTION;
+		}
+
+	      for (int i = 0; i < func->inArgCount; ++i)
+		{
+		  struct BrigDirectiveVariable *arg
+		    = (struct BrigDirectiveVariable *) ADDR_IN_CLONE
+		    ((struct BrigDirectiveVariable *)
+		     (code_section + func->firstInArg) + i);
+		  arg->linkage = BRIG_LINKAGE_FUNCTION;
+		}
+	    }
+	}
+      pos = func->nextModuleEntry;
+    }
+
+#ifdef DEBUG_BRIG_SPECIALIZATION
+  FILE *predefsdump = fopen("before-defs.brig", "w+");
+  fwrite (*modified_module != NULL ? *modified_module : module,
+	  1, mheader->byteCount, predefsdump);
+  fclose (predefsdump);
+#endif
+
+  /* Search the operand section for function references to the placeholder func
+     decl and fix it to point to a previously found definition instead.  */
+
+  struct BrigSectionHeader *operand_section_header
+    = (struct BrigSectionHeader *) operand_section;
+
+  for (uint32_t pos = operand_section_header->headerByteCount;
+       nreplacement_defs > 0 && nplaceholder_decls > 0
+	 && pos < operand_section_size; )
+    {
+      struct BrigBase *operand = (struct BrigBase *) (operand_section + pos);
+      pos += operand->byteCount;
+      if (operand->kind != BRIG_KIND_OPERAND_CODE_REF)
+	continue;
+
+      struct BrigOperandCodeRef *coderef
+	= (struct BrigOperandCodeRef *) operand;
+
+      struct BrigDirectiveExecutable *func
+	= (struct BrigDirectiveExecutable *) (code_section + coderef->ref);
+
+      struct BrigData *name = (struct BrigData *) (data_section + func->name);
+
+      for (int i = 0; i < nrepl; ++i)
+	{
+	  struct func_resolution_data *rd = &rdata [i];
+	  if (rd->replacement_def == NULL
+	      || strncmp ((char*) name->bytes, rd->placeholder_name,
+			  rd->placeholder_name_len) != 0)
+	    continue;
+
+	  HSA_DEBUG ("Fixing a call to placeholder decl '%s' to call "
+		     "a def instead.\n", rd->placeholder_name);
+
+	  CLONE_MODULE;
+
+	  /* Patch the call operand to point to the definition instead of
+	     the placeholder declaration (case 2).  */
+	  struct BrigOperandCodeRef *mod_coderef
+	    = (struct BrigOperandCodeRef *) ADDR_IN_CLONE (coderef);
+	  mod_coderef->ref = ADDR_IN_CLONE (rd->replacement_def)
+	    - ADDR_IN_CLONE (code_section);
+	  break;
+	}
+    }
+
+#ifdef DEBUG_BRIG_SPECIALIZATION
+  if (*modified_module != NULL)
+    {
+      FILE *predump = fopen("before-rename.brig", "w+");
+      fwrite (*modified_module, 1, mheader->byteCount, predump);
+      fclose (predump);
+    }
+#endif
+
+  /* Finally, rename any placeholder declarations we saw to match the
+     replacement callee's name.  This implements Case 1 and fixes the
+     declaration name to adhere to BRIG's forward declaration requirements
+     for Case 2.  */
+  for (int i = 0; nplaceholder_decls > 0 && i < nrepl; ++i)
+    {
+      struct func_resolution_data *rd = &rdata [i];
+      if (rd->placeholder_decl == NULL)
+	continue;
+
+      CLONE_MODULE;
+
+      /* Modify the placeholder function declaration's name to match
+	 the targeted function.    */
+
+      int padding_bytes = (4 - rd->replacement_name_len % 4) % 4;
+
+      /* Check that the functor name including the additional 4B size field
+	 and up to 3B of padding fits in the placeholder.  We must retain at
+	 least one byte of the original placeholder function name to make the
+	 result remain a valid BRIG.  */
+
+      int64_t remainder_len
+	= rd->placeholder_name_len - rd->replacement_name_len
+	- sizeof (uint32_t) - padding_bytes;
+
+      if (remainder_len < 1)
+	{
+	  HSA_DEBUG ("The function placeholder decl name string '%s' is too "
+		     "short to contain the replacement '%s'.",
+		     rd->placeholder_name, rd->replacement_name);
+	  ret_val = 0;
+	  goto error_cleanup_exit;
+	}
+
+      struct BrigDirectiveExecutable *func = rd->placeholder_decl;
+      struct BrigData *name = (struct BrigData *) (data_section + func->name);
+
+      void *pos = name->bytes;
+
+      char *modified_pos = ADDR_IN_CLONE (pos);
+      memcpy (modified_pos, rd->replacement_name, rd->replacement_name_len);
+
+      /* Update the length field.  */
+      *(((uint32_t*)modified_pos) - 1) = rd->replacement_name_len;
+
+      /* Fix the remains of the old declaration string so it's still
+	 a valid BRIG hsa_data entry.  It should be enough to write
+	 a byteCount of the remaining string piece to its beginning. */
+      char *old_str_remainder
+	= ((char*)modified_pos + rd->replacement_name_len + padding_bytes);
+
+      *(((uint32_t*)old_str_remainder)) = remainder_len;
+
+      /* Append padding 0 bytes to make the next entry start at a 4 byte
+	 boundary.  */
+      while (padding_bytes-- > 0)
+	*((char*)modified_pos + rd->replacement_name_len + padding_bytes) = 0;
+
+      HSA_DEBUG ("Renamed '%s' to '%s'.\n", rd->placeholder_name,
+		 rd->replacement_name);
+    }
+
+#ifdef DEBUG_BRIG_SPECIALIZATION
+  if (*modified_module != NULL)
+    {
+      FILE *dump = fopen("after-rename.brig", "w+");
+      fwrite (*modified_module, 1, mheader->byteCount, dump);
+      fclose (dump);
+    }
+#endif
+
+  goto cleanup_exit;
+
+ error_cleanup_exit:
+  free (*modified_module);
+  *modified_module = NULL;
+
+ cleanup_exit:
+  free (rdata);
+  return ret_val;
+}
+
+/* Create, specialize and finalize the program consisting of all loaded modules
+   for the given AGENT.
+
+   DECL_REPL is an optional NULL terminated list of function name pairs where
+   the first one is the name of the "placeholder" declaration that should be
+   replaced with calls to the second one.
+
+   KERNEL is set to the function_info of the kernel we want to finalize.
+   Other kernels are pruned off from the BRIG.  This is required in case
+   there are multiple kernels with function call replacements in the
+   program image, but it also helps to improve the finalization speed in
+   general with large programs.
+
+   On success, stores the reference to the finalized executable to
+   EXEC and returns true.  */
+
+static bool
+create_and_finalize_hsa_program (struct agent_info *agent,
+				 const char **decl_repl,
+				 const struct function_info *kernel,
+				 hsa_executable_t *exec)
 {
   hsa_status_t status;
   hsa_ext_program_t prog_handle;
@@ -989,8 +1601,58 @@ create_and_finalize_hsa_program (struct agent_info *agent)
 
   if (pthread_mutex_lock (&agent->prog_mutex))
     GOMP_PLUGIN_fatal ("Could not lock an HSA agent program mutex");
-  if (agent->prog_finalized)
-    goto final;
+
+  unsigned repl_count = 0;
+  const char **pos = decl_repl;
+
+  while (pos != NULL && *pos++ != NULL)
+    repl_count++;
+
+  struct exec_cache_entry *entry = agent->exec_cache;
+  struct exec_cache_entry **last_entry = &agent->exec_cache;
+  while (entry != NULL)
+    {
+      /* Assume the function names are per process constants so we can quickly
+	 compare only the pointers here.  */
+      if (entry->kernel == kernel &&
+	  bcmp (decl_repl, entry->decl_repl,
+		sizeof (entry->decl_repl) * repl_count) == 0)
+	{
+	  HSA_DEBUG("Found a previously finalized binary.\n");
+	  agent->executable = entry->executable;
+	  agent->finalization_error = entry->finalization_error;
+	  agent->finalized = true;
+	  break;
+	}
+      last_entry = &entry->next;
+      entry = entry->next;
+    }
+
+  if (entry != NULL)
+    {
+      if (pthread_mutex_unlock (&agent->prog_mutex))
+	GOMP_PLUGIN_fatal ("Could not unlock an HSA agent program mutex");
+      if (exec)
+	*exec = entry->executable;
+      return true;
+    }
+  else
+    HSA_DEBUG("Specializing and finalizing the kernel...\n");
+
+  /* Create a new cache entry for the finalized binary.  */
+  struct exec_cache_entry *new_entry = NULL;
+
+  if (inmemory_kernel_cache)
+    {
+      new_entry
+	= GOMP_PLUGIN_malloc_cleared (sizeof (struct exec_cache_entry));
+      new_entry->kernel = kernel;
+      memcpy (&new_entry->decl_repl[0], decl_repl,
+	      sizeof (char*) * repl_count);
+      *last_entry = new_entry;
+    }
+
+  const char *kernel_name = kernel->name;
 
   status = hsa_fns.hsa_ext_program_create_fn
     (HSA_MACHINE_MODEL_LARGE, HSA_PROFILE_FULL,
@@ -1002,10 +1664,45 @@ create_and_finalize_hsa_program (struct agent_info *agent)
   HSA_DEBUG ("Created a finalized program\n");
 
   struct module_info *module = agent->first_module;
+
   while (module)
     {
-      status = hsa_fns.hsa_ext_program_add_module_fn
-	(prog_handle, module->image_desc->brig_module);
+      /* In case the BRIG contains placeholder function declarations we want
+	 to resolve at finalization time, do it here.  */
+      /* FIXME: this leaks if we created a clone of the BRIG in
+	 specialization. */
+      if (decl_repl == NULL)
+	{
+	  status
+	    = hsa_fns.hsa_ext_program_add_module_fn
+	    (prog_handle, module->image_desc->brig_module);
+	}
+      else
+	{
+	  hsa_ext_module_t modified_brig = NULL;
+	  if (specialize_brig (module->image_desc->brig_module,
+			       &modified_brig, decl_repl,
+			       kernel_name))
+	    {
+	      if (modified_brig == NULL)
+		status = hsa_fns.hsa_ext_program_add_module_fn
+		  (prog_handle, module->image_desc->brig_module);
+	      else
+		status = hsa_fns.hsa_ext_program_add_module_fn
+		  (prog_handle, modified_brig);
+	    }
+	  else
+	    {
+	      /* Graceful fallback to the host execution.  */
+	      HSA_DEBUG ("Placeholder function declaration fixing failed");
+	      if (pthread_mutex_unlock (&agent->prog_mutex))
+		GOMP_PLUGIN_fatal ("Could not unlock an HSA agent program mutex");
+	      agent->finalization_error = true;
+	      if (inmemory_kernel_cache)
+		new_entry->finalization_error = true;
+	      return false;
+	    }
+	}
       if (status != HSA_STATUS_SUCCESS)
 	hsa_fatal ("Could not add a module to the HSA program", status);
       module = module->next;
@@ -1044,13 +1741,23 @@ create_and_finalize_hsa_program (struct agent_info *agent)
   hsa_ext_control_directives_t control_directives;
   memset (&control_directives, 0, sizeof (control_directives));
   hsa_code_object_t code_object;
+
+  /* Finalizers should ignore the options they don't recognize, but Carrizzo's
+     fails if we pass phsa-specific flags unconditionally.  */
+
   status = hsa_fns.hsa_ext_program_finalize_fn
-    (prog_handle, agent->isa,HSA_EXT_FINALIZER_CALL_CONVENTION_AUTO,
-     control_directives, "", HSA_CODE_OBJECT_TYPE_PROGRAM, &code_object);
+    (prog_handle, agent->isa, HSA_EXT_FINALIZER_CALL_CONVENTION_AUTO,
+     control_directives, agent->is_phsa ? "-phsa_strict-aliasing" : "",
+     HSA_CODE_OBJECT_TYPE_PROGRAM, &code_object);
   if (status != HSA_STATUS_SUCCESS)
     {
       hsa_warn ("Finalization of the HSA program failed", status);
-      goto failure;
+      if (inmemory_kernel_cache)
+	new_entry->finalization_error = true;
+      agent->finalization_error = true;
+      if (pthread_mutex_unlock (&agent->prog_mutex))
+	GOMP_PLUGIN_fatal ("Could not unlock an HSA agent program mutex");
+      return false;
     }
 
   HSA_DEBUG ("Finalization done\n");
@@ -1094,25 +1801,23 @@ create_and_finalize_hsa_program (struct agent_info *agent)
   if (status != HSA_STATUS_SUCCESS)
     hsa_fatal ("Could not freeze the HSA executable", status);
 
+  if (inmemory_kernel_cache)
+    new_entry->executable = agent->executable;
+
   HSA_DEBUG ("Froze HSA executable with the finalized code object\n");
-
-  /* If all goes good, jump to final.  */
-  goto final;
-
-failure:
-  agent->prog_finalized_error = true;
-
-final:
-  agent->prog_finalized = true;
 
   if (pthread_mutex_unlock (&agent->prog_mutex))
     GOMP_PLUGIN_fatal ("Could not unlock an HSA agent program mutex");
+
+  if (exec)
+    *exec = agent->executable;
+  return true;
 }
 
 /* Create kernel dispatch data structure for given KERNEL.  */
 
 static struct GOMP_hsa_kernel_dispatch *
-create_single_kernel_dispatch (struct kernel_info *kernel,
+create_single_kernel_dispatch (struct function_info *kernel,
 			       unsigned omp_data_size)
 {
   struct agent_info *agent = kernel->agent;
@@ -1176,7 +1881,7 @@ release_kernel_dispatch (struct GOMP_hsa_kernel_dispatch *shadow)
    to calculate maximum necessary memory for OMP data allocation.  */
 
 static void
-init_single_kernel (struct kernel_info *kernel, unsigned *max_omp_data_size)
+init_single_kernel (struct function_info *kernel, unsigned *max_omp_data_size)
 {
   hsa_status_t status;
   struct agent_info *agent = kernel->agent;
@@ -1187,6 +1892,7 @@ init_single_kernel (struct kernel_info *kernel, unsigned *max_omp_data_size)
   if (status != HSA_STATUS_SUCCESS)
     {
       hsa_warn ("Could not find symbol for kernel in the code object", status);
+      HSA_DEBUG ("Missing symbol: '%s'\n", kernel->name);
       goto failure;
     }
   HSA_DEBUG ("Located kernel %s\n", kernel->name);
@@ -1227,8 +1933,8 @@ init_single_kernel (struct kernel_info *kernel, unsigned *max_omp_data_size)
 
   for (unsigned i = 0; i < kernel->dependencies_count; i++)
     {
-      struct kernel_info *dependency
-	= get_kernel_for_agent (agent, kernel->dependencies[i]);
+      struct function_info *dependency
+	= get_function_for_agent (agent, kernel->dependencies[i]);
 
       if (dependency == NULL)
 	{
@@ -1241,7 +1947,7 @@ init_single_kernel (struct kernel_info *kernel, unsigned *max_omp_data_size)
       if (dependency->dependencies_count > 0)
 	{
 	  HSA_DEBUG ("HSA does not allow kernel dispatching code with "
-		     "a depth bigger than one\n");
+		     "a depth larger than one\n");
 	  goto failure;
 	}
 
@@ -1301,7 +2007,7 @@ print_kernel_dispatch (struct GOMP_hsa_kernel_dispatch *dispatch, unsigned inden
    dependencies.  */
 
 static struct GOMP_hsa_kernel_dispatch *
-create_kernel_dispatch (struct kernel_info *kernel, unsigned omp_data_size)
+create_kernel_dispatch (struct function_info *kernel, unsigned omp_data_size)
 {
   struct GOMP_hsa_kernel_dispatch *shadow
     = create_single_kernel_dispatch (kernel, omp_data_size);
@@ -1310,11 +2016,11 @@ create_kernel_dispatch (struct kernel_info *kernel, unsigned omp_data_size)
   shadow->omp_level = kernel->gridified_kernel_p ? 1 : 0;
 
   /* Create kernel dispatch data structures.  We do not allow to have
-     a kernel dispatch with depth bigger than one.  */
+     a kernel dispatch with depth larger than one.  */
   for (unsigned i = 0; i < kernel->dependencies_count; i++)
     {
-      struct kernel_info *dependency
-	= get_kernel_for_agent (kernel->agent, kernel->dependencies[i]);
+      struct function_info *dependency
+	= get_function_for_agent (kernel->agent, kernel->dependencies[i]);
       shadow->children_dispatches[i]
 	= create_single_kernel_dispatch (dependency, omp_data_size);
       shadow->children_dispatches[i]->queue
@@ -1330,7 +2036,7 @@ create_kernel_dispatch (struct kernel_info *kernel, unsigned omp_data_size)
    create_and_finalize_hsa_program.  */
 
 static void
-init_kernel (struct kernel_info *kernel)
+init_kernel (struct function_info *kernel)
 {
   if (pthread_mutex_lock (&kernel->init_mutex))
     GOMP_PLUGIN_fatal ("Could not lock an HSA kernel initialization mutex");
@@ -1445,13 +2151,12 @@ get_group_size (uint32_t ndim, uint32_t grid, uint32_t group)
 bool
 GOMP_OFFLOAD_can_run (void *fn_ptr)
 {
-  struct kernel_info *kernel = (struct kernel_info *) fn_ptr;
+  struct function_info *kernel = (struct function_info *) fn_ptr;
   struct agent_info *agent = kernel->agent;
-  create_and_finalize_hsa_program (agent);
-
-  if (agent->prog_finalized_error)
+  if (!create_and_finalize_hsa_program (agent, NULL, kernel, NULL))
     goto failure;
 
+  /* TODO: check that it's a kernel, not a program scope HSA function.  */
   init_kernel (kernel);
   if (kernel->initialization_failed)
     goto failure;
@@ -1474,11 +2179,13 @@ packet_store_release (uint32_t* packet, uint16_t header, uint16_t rest)
 }
 
 /* Run KERNEL on its agent, pass VARS to it as arguments and take
-   launchattributes from KLA.  */
+   launch attributes from KLA.  KERNEL_OBJECT is the kernel handle
+   to execute. */
 
 void
-run_kernel (struct kernel_info *kernel, void *vars,
-	    struct GOMP_kernel_launch_attributes *kla)
+run_kernel (struct function_info *kernel, void *vars,
+	    struct GOMP_kernel_launch_attributes *kla,
+	    uint64_t kernel_object)
 {
   struct agent_info *agent = kernel->agent;
   if (pthread_rwlock_rdlock (&agent->modules_rwlock))
@@ -1533,7 +2240,7 @@ run_kernel (struct kernel_info *kernel, void *vars,
     {
       packet->grid_size_z = kla->gdims[2];
       packet->workgroup_size_z = get_group_size (kla->ndim, kla->gdims[2],
-					     kla->wdims[2]);
+						 kla->wdims[2]);
     }
   else
     {
@@ -1543,7 +2250,7 @@ run_kernel (struct kernel_info *kernel, void *vars,
 
   packet->private_segment_size = kernel->private_segment_size;
   packet->group_segment_size = kernel->group_segment_size;
-  packet->kernel_object = kernel->object;
+  packet->kernel_object = kernel_object;
   packet->kernarg_address = shadow->kernarg_address;
   hsa_signal_t s;
   s.handle = shadow->signal;
@@ -1569,7 +2276,18 @@ run_kernel (struct kernel_info *kernel, void *vars,
   header |= HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_ACQUIRE_FENCE_SCOPE;
   header |= HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_RELEASE_FENCE_SCOPE;
 
+  /* Note: This debug message should not be changed as the tests use it
+     for verifying that HSA offloading works and disable all HSA tests
+     otherwise.  */
   HSA_DEBUG ("Going to dispatch kernel %s\n", kernel->name);
+
+  struct timespec ts;
+  uint64_t start_time = 0;
+  if (debug)
+    {
+      clock_gettime (CLOCK_REALTIME, &ts);
+      start_time = ts.tv_sec * (uint64_t)1000000000 + ts.tv_nsec;
+    }
 
   packet_store_release ((uint32_t *) packet, header,
 			(uint16_t) kla->ndim << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
@@ -1599,6 +2317,16 @@ run_kernel (struct kernel_info *kernel, void *vars,
 	hsa_fns.hsa_signal_load_acquire_fn (child_s);
       }
 
+  if (debug)
+    {
+      clock_gettime (CLOCK_REALTIME, &ts);
+
+      uint64_t end_time = ts.tv_sec * (uint64_t)1000000000 + ts.tv_nsec;
+      uint64_t exec_time = end_time - start_time;
+
+      HSA_DEBUG ("Kernel finished in %lu us\n", exec_time / 1000);
+    }
+
   release_kernel_dispatch (shadow);
 
   if (pthread_rwlock_unlock (&agent->modules_rwlock))
@@ -1608,13 +2336,13 @@ run_kernel (struct kernel_info *kernel, void *vars,
 /* Part of the libgomp plugin interface.  Run a kernel on device N (the number
    is actually ignored, we assume the FN_PTR has been mapped using the correct
    device) and pass it an array of pointers in VARS as a parameter.  The kernel
-   is identified by FN_PTR which must point to a kernel_info structure.  */
+   is identified by FN_PTR which must point to a function_info structure.  */
 
 void
 GOMP_OFFLOAD_run (int n __attribute__((unused)),
 		  void *fn_ptr, void *vars, void **args)
 {
-  struct kernel_info *kernel = (struct kernel_info *) fn_ptr;
+  struct function_info *kernel = (struct function_info *) fn_ptr;
   struct GOMP_kernel_launch_attributes def;
   struct GOMP_kernel_launch_attributes *kla;
   if (!parse_target_attributes (args, &def, &kla))
@@ -1622,7 +2350,7 @@ GOMP_OFFLOAD_run (int n __attribute__((unused)),
       HSA_DEBUG ("Will not run HSA kernel because the grid size is zero\n");
       return;
     }
-  run_kernel (kernel, vars, kla);
+  run_kernel (kernel, vars, kla, kernel->object);
 }
 
 /* Information to be passed to a thread running a kernel asycnronously.  */
@@ -1683,6 +2411,194 @@ GOMP_OFFLOAD_async_run (int device, void *tgt_fn, void *tgt_vars,
 		       "asynchronously: %s", strerror (err));
 }
 
+/* The following function is a part of support for HSA direct invocation
+   that is an easy-to-use mechanism to launch HSA kernels from C/C++
+   code.  DEVICE_ORD is the index of the Agent in the list of agents found
+   in the system.  KERNEL_NAME is the name of the kernel function to launch.
+   {X,Y,Z}_GRID is used to set the grid size and {X,Y,Z}_GROUP the work group
+   size.  If the work-group sizes are all zeros, the function attempts to find
+   an optimal WG dimensions for the Agent at hand.  VARS is a pointer to the
+   argument buffer passed to the kernel.
+
+   The optional PLACEHOLDER_FUNC{1,2,3,4} and matching HSA_FUNC{1,2,3,4} parameters
+   can be used to specialize marked function calls performed by the kernel before
+   finalization with invoke-time known BRIG functions.  That is, calls to
+   a function declaration of which name is given in a PLACEHOLDER_FUNC# parameter
+   are replaced with calls to another function with a matching finger print
+   of which descriptor is stored in HSA_FUNC#.  Maximum of 4 function call
+   specializations can be this way performed per a direct_invoke call.
+
+   Returns:
+   0 = successful invocation
+   1 = error during finalization, but host fallback could be executed
+*/
+
+int
+GOMP_OFFLOAD_direct_invoke (int device_ord, const char *kernel_name,
+			    unsigned x_grid, unsigned x_group,
+			    unsigned y_grid, unsigned y_group,
+			    unsigned z_grid, unsigned z_group,
+			    void *vars,
+			    const char *placeholder_func1,
+			    const void *hsa_func1,
+			    const char *placeholder_func2,
+			    const void *hsa_func2,
+			    const char *placeholder_func3,
+			    const void *hsa_func3,
+			    const char *placeholder_func4,
+			    const void *hsa_func4)
+{
+
+#define RET_SUCCESS  0
+#define RET_FALLBACK 1
+
+  if (x_grid == 0 && y_grid == 0 && z_grid == 0)
+    GOMP_PLUGIN_fatal ("HSADIRECT: 0 size SPMD launch");
+
+  struct agent_info *agent = get_agent_info (device_ord);
+  if (!agent)
+    {
+      HSA_DEBUG ("HSADIRECT: Could not access the requested HSA agent.");
+      return RET_FALLBACK;
+    }
+
+  if (x_group == 0 && y_group == 0 && z_group == 0)
+    {
+      /* Only the the grid size was defined and the group size was
+	 let to be freely chosen.  Try to choose an optimal group size.
+	 At least ensure the group is small enough to fit in the
+	 maximum work items per group limitations of the Agent at
+	 hand.  */
+
+      /* Primarily attempt to maximize the local size to improve
+	 locality.  */
+      x_group = x_grid;
+      y_group = y_grid;
+      z_group = z_grid;
+
+      if (x_group > agent->max_wg_dim[0])
+	x_group = agent->max_wg_dim[0];
+
+      if (y_group > agent->max_wg_dim[1])
+	y_group = agent->max_wg_dim[1];
+
+      if (z_group > agent->max_wg_dim[2])
+	z_group = agent->max_wg_dim[2];
+
+      while (x_group * y_group * z_group > agent->max_wg_wis)
+	{
+	  if (z_group > 1) z_group /= 2;
+	  else if (y_group > 1) y_group /= 2;
+	  else if (x_group > 1) x_group /= 2;
+	}
+    }
+  else
+    {
+      if (x_group > agent->max_wg_dim[0]
+	  || y_group > agent->max_wg_dim[1]
+	  || z_group > agent->max_wg_dim[2]
+	  || x_group * y_group * z_group > agent->max_wg_wis)
+	{
+	  HSA_DEBUG ("Local size %u x %u x %u exceeds the agent's work-group "
+		     "limits.\n", x_group, y_group, z_group);
+	  return RET_FALLBACK;
+	}
+    }
+  HSA_DEBUG ("Grid size %u x %u x %u. Local size %u x %u x %u.\n",
+	     x_grid, y_grid, z_grid, x_group, y_group, z_group);
+
+  struct function_info *kernel = get_function_for_agent (agent, kernel_name);
+  if (!kernel || !kernel->kernel_p)
+    {
+      HSA_DEBUG ("HSADIRECT: Could not locate the invoked kernel %s",
+		 kernel_name);
+      return RET_FALLBACK;
+    }
+
+  bool specialized = false;
+  hsa_executable_t exec;
+  if (placeholder_func1 != NULL && hsa_func1 != NULL)
+    {
+      const char *replacements[] =
+	{
+	  placeholder_func1,
+	  (hsa_func1 ? ((struct function_info*)hsa_func1)->name : ""),
+	  placeholder_func2,
+	  (hsa_func2 ? ((struct function_info*)hsa_func2)->name : ""),
+	  placeholder_func3,
+	  (hsa_func3 ? ((struct function_info*)hsa_func3)->name : ""),
+	  placeholder_func4,
+	  (hsa_func4 ? ((struct function_info*)hsa_func4)->name : ""),
+	};
+
+      if (!create_and_finalize_hsa_program (agent, replacements, kernel,
+					    &exec))
+	return RET_FALLBACK;
+      specialized = true;
+    }
+  else
+    if (!create_and_finalize_hsa_program (agent, NULL, kernel, &exec))
+      return RET_FALLBACK;
+
+  /* FIXME: this is not thread safe as multiple threads update the same
+     finalization_error flag.  */
+  if (agent->finalization_error)
+    {
+      HSA_DEBUG ("HSADIRECT: Finalization failure.");
+      return RET_FALLBACK;
+    }
+  init_kernel (kernel);
+  /* FIXME: this is not thread safe as multiple threads update the
+     same initialization_failed flag.  */
+  if (kernel->initialization_failed)
+    {
+      HSA_DEBUG ("HSADIRECT: Kernel cannot be run");
+      return RET_FALLBACK;
+    }
+
+  struct GOMP_kernel_launch_attributes kla;
+  if (z_grid)
+    kla.ndim = 3;
+  else if (y_grid)
+    kla.ndim = 2;
+  else
+    kla.ndim = 1;
+  kla.gdims[0] = x_grid;
+  kla.gdims[1] = y_grid;
+  kla.gdims[2] = z_grid;
+
+  kla.wdims[0] = x_group;
+  kla.wdims[1] = y_group;
+  kla.wdims[2] = z_group;
+
+  if (specialized)
+    {
+      /* If we have specialized the kernel, use the specialized kernel object
+	 instead of the default non-specialized one stored in 'kernel'.  */
+      hsa_executable_symbol_t kernel_symbol;
+      hsa_status_t status
+	= hsa_fns.hsa_executable_get_symbol_fn (exec, NULL,
+						kernel->name, agent->id,
+						0, &kernel_symbol);
+      if (status != HSA_STATUS_SUCCESS)
+	{
+	  hsa_warn ("Could not find symbol for kernel in the code object", status);
+	  HSA_DEBUG ("Missing symbol: '%s'\n", kernel->name);
+	  return RET_FALLBACK;
+	}
+      HSA_DEBUG ("Located kernel %s\n", kernel->name);
+      uint64_t object;
+      status = hsa_fns.hsa_executable_symbol_get_info_fn
+	(kernel_symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT, &object);
+      if (status != HSA_STATUS_SUCCESS)
+	hsa_fatal ("Could not extract a kernel object from its symbol", status);
+      run_kernel (kernel, vars, &kla, object);
+    }
+  else
+    run_kernel (kernel, vars, &kla, kernel->object);
+  return RET_SUCCESS;
+}
+
 /* Deinitialize all information associated with MODULE and kernels within
    it.  Return TRUE on success.  */
 
@@ -1690,8 +2606,8 @@ static bool
 destroy_module (struct module_info *module)
 {
   int i;
-  for (i = 0; i < module->kernel_count; i++)
-    if (pthread_mutex_destroy (&module->kernels[i].init_mutex))
+  for (i = 0; i < module->function_count; i++)
+    if (pthread_mutex_destroy (&module->functions[i].init_mutex))
       {
 	GOMP_PLUGIN_error ("Failed to destroy an HSA kernel initialization "
 			   "mutex");
@@ -1768,6 +2684,8 @@ GOMP_OFFLOAD_fini_device (int n)
 
   if (!agent->initialized)
     return true;
+
+  HSA_DEBUG ("Finishing agent %p\n", agent);
 
   struct module_info *next_module = agent->first_module;
   while (next_module)

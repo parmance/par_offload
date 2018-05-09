@@ -964,6 +964,11 @@ struct gomp_device_descr
   __typeof (GOMP_OFFLOAD_run) *run_func;
   __typeof (GOMP_OFFLOAD_async_run) *async_run_func;
 
+  void (*direct_invoke_func) (int, const char *, unsigned, unsigned, unsigned,
+			      unsigned, unsigned, unsigned, void *,
+			      const char*, const void*, const char*, const void*,
+			      const char*, const void*, const char*, const void*);
+
   /* Splay tree containing information about mapped memory regions.  */
   struct splay_tree_s mem_map;
 

@@ -202,7 +202,10 @@ enum gomp_map_kind
 #define GOMP_VERSION	1
 #define GOMP_VERSION_NVIDIA_PTX 1
 #define GOMP_VERSION_INTEL_MIC 0
-#define GOMP_VERSION_HSA 0
+/* Experimental HSA branches have the 15th bit set.  Remove for comparisons
+   with normal versions.  Also remove together with this comment if bumping
+   version upstream.  */
+#define GOMP_VERSION_HSA ((1<<15) + 1)
 
 #define GOMP_VERSION_PACK(LIB, DEV) (((LIB) << 16) | (DEV))
 #define GOMP_VERSION_LIB(PACK) (((PACK) >> 16) & 0xffff)
@@ -255,5 +258,9 @@ enum gomp_map_kind
 
 /* Identifiers of device-specific target arguments.  */
 #define GOMP_TARGET_ARG_HSA_KERNEL_ATTRIBUTES	(1 << 8)
+
+/* The maximum number of BRIG function declaration replacements
+   we do per kernel call/finalization.  */
+#define GOMP_TARGET_HSA_MAX_BRIG_FUNC_DECL_REPL 4
 
 #endif

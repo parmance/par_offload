@@ -34,6 +34,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "function.h"
 #include "basic-block.h"
 #include "gimple.h"
+#include "gimple-iterator.h"
 #include "dumpfile.h"
 #include "gimple-pretty-print.h"
 #include "tree-streamer.h"
@@ -42,6 +43,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "print-tree.h"
 #include "symbol-summary.h"
 #include "hsa-common.h"
+#include "cfg.h"
+#include "attribs.h"
+#include "tree-cfg.h"
 
 namespace {
 
@@ -74,7 +78,8 @@ process_hsa_functions (void)
   if (hsa_summaries == NULL)
     hsa_summaries = new hsa_summary_t (symtab);
 
-  FOR_EACH_DEFINED_FUNCTION (node)
+
+  FOR_EACH_FUNCTION (node)
     {
       hsa_function_summary *s = hsa_summaries->get (node);
 
@@ -82,8 +87,20 @@ process_hsa_functions (void)
       if (s->m_bound_function != NULL)
 	continue;
 
-      if (s->m_kind != HSA_NONE)
+      if (lookup_attribute ("hsa_placeholder", DECL_ATTRIBUTES (node->decl)))
 	{
+	  /* The placeholder functions are treated as artificial functions,
+	     but they need to end up in the BRIG to enable the specialization.
+	     Ensure this is the case by forcing them public.  */
+	  TREE_PUBLIC (node->decl) = true;
+	}
+      else if (lookup_attribute ("hsa_kernel", DECL_ATTRIBUTES (node->decl)))
+	hsa_summaries->mark_hsa_only_implementation (node, HSA_KERNEL);
+      else if (lookup_attribute ("hsa_function", DECL_ATTRIBUTES (node->decl))
+	       || s->m_kind != HSA_NONE)
+	{
+	  if (lookup_attribute ("hsa_function", DECL_ATTRIBUTES (node->decl)))
+	    hsa_summaries->mark_hsa_only_implementation (node, HSA_FUNCTION);
 	  if (!check_warn_node_versionable (node))
 	    continue;
 	  cgraph_node *clone
@@ -96,9 +113,43 @@ process_hsa_functions (void)
 	  hsa_summaries->link_functions (clone, node, s->m_kind, false);
 
 	  if (dump_file)
-	    fprintf (dump_file, "Created a new HSA clone: %s, type: %s\n",
-		     clone->name (),
-		     s->m_kind == HSA_KERNEL ? "kernel" : "function");
+	    fprintf (dump_file, "Created a new HSA clone: %s, type: %s " \
+		     "gridified %d\n", clone->name (),
+		     s->m_kind == HSA_KERNEL ? "kernel" : "function",
+		     s->m_gridified_kernel_p);
+	}
+      else if (lookup_attribute ("hsa_universal",
+				 DECL_ATTRIBUTES (node->decl)))
+	{
+	  /* hsa_universal functions are compiled both to host ISA and HSAIL.
+	     Thus, they should not contain HSA-specific builtin calls.  They
+	     also get indexed, meaning one can query a device's function handle
+	     via the GOMP_host_to_device_fptr() API.  */
+	  if (!lookup_attribute ("omp declare target",
+				 DECL_ATTRIBUTES (node->decl)))
+	    DECL_ATTRIBUTES (node->decl)
+	      = tree_cons (get_identifier ("omp declare target"),
+			   NULL_TREE, DECL_ATTRIBUTES (node->decl));
+
+	  if (!check_warn_node_versionable (node))
+            continue;
+          cgraph_node *clone
+            = node->create_virtual_clone (vec <cgraph_edge *> (),
+                                          NULL, NULL, "hsa");
+
+	  TREE_PUBLIC (clone->decl) = TREE_PUBLIC (node->decl);
+
+          clone->externally_visible = node->externally_visible;
+
+          if (!cgraph_local_p (node))
+            clone->force_output = true;
+          hsa_summaries->link_functions (clone, node, HSA_FUNCTION, false);
+
+          if (dump_file)
+            fprintf (dump_file,
+		     "Created a new hsa_universal function clone: %s\n",
+                     clone->name ());
+
 	}
       else if (hsa_callable_function_p (node->decl)
 	       /* At this point, this is enough to identify clones for
@@ -110,12 +161,15 @@ process_hsa_functions (void)
 	  cgraph_node *clone
 	    = node->create_virtual_clone (vec <cgraph_edge *> (),
 					  NULL, NULL, "hsa");
+
 	  TREE_PUBLIC (clone->decl) = TREE_PUBLIC (node->decl);
+
 	  clone->externally_visible = node->externally_visible;
 
 	  if (!cgraph_local_p (node))
 	    clone->force_output = true;
-	  hsa_summaries->link_functions (clone, node, HSA_FUNCTION, false);
+
+	  hsa_summaries->link_functions (clone, node, HSA_KERNEL, false);
 
 	  if (dump_file)
 	    fprintf (dump_file, "Created a new HSA function clone: %s\n",
@@ -131,10 +185,10 @@ process_hsa_functions (void)
       while (e)
 	{
 	  hsa_function_summary *src = hsa_summaries->get (node);
-	  if (src->m_kind != HSA_NONE && src->m_gpu_implementation_p)
+	  if (src->m_kind != HSA_NONE && src->m_hsa_implementation_p)
 	    {
 	      hsa_function_summary *dst = hsa_summaries->get (e->callee);
-	      if (dst->m_kind != HSA_NONE && !dst->m_gpu_implementation_p)
+	      if (dst->m_kind != HSA_NONE && !dst->m_hsa_implementation_p)
 		{
 		  e->redirect_callee (dst->m_bound_function);
 		  if (dump_file)
@@ -197,7 +251,7 @@ ipa_hsa_write_summary (void)
 
 	  bp = bitpack_create (ob->main_stream);
 	  bp_pack_value (&bp, s->m_kind, 2);
-	  bp_pack_value (&bp, s->m_gpu_implementation_p, 1);
+	  bp_pack_value (&bp, s->m_hsa_implementation_p, 1);
 	  bp_pack_value (&bp, s->m_bound_function != NULL, 1);
 	  streamer_write_bitpack (&bp);
 	  if (s->m_bound_function)
@@ -248,7 +302,7 @@ ipa_hsa_read_section (struct lto_file_decl_data *file_data, const char *data,
 
       struct bitpack_d bp = streamer_read_bitpack (&ib_main);
       s->m_kind = (hsa_function_kind) bp_unpack_value (&bp, 2);
-      s->m_gpu_implementation_p = bp_unpack_value (&bp, 1);
+      s->m_hsa_implementation_p = bp_unpack_value (&bp, 1);
       bool has_tree = bp_unpack_value (&bp, 1);
 
       if (has_tree)
